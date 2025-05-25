@@ -157,3 +157,5 @@ if with_glx != 'disabled' and not with_glvnd
 endif
 
 subdir('tool')
+
+subdir('fsa')
