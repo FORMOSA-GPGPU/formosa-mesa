@@ -1,16 +1,34 @@
 files_fsa_compiler= files(
-  'main.cc',
-  'fsa_compiler.h',
-  'fsa_compiler.cc',
+  'main.c',
+  'fsa_compiler.c',
+  'fsa_nir_to_llvm.c',
+  'fsa_llvm_build.c',
+  'fsa_gen_test_nir.c',
+  'argparse.c'
 )
+
+dep_ncurses = dependency('ncurses')
 
 fsa_compiler = executable(
   'fsa_compiler',
   files_fsa_compiler,
   c_args: ['-ggdb3'],
-  cpp_args: ['-ggdb3'],
-  dependencies: [idep_getopt, idep_mesautil],
-  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
+  cpp_args: ['-ggdb3', '-fno-rtti'],
+  dependencies: [
+    idep_getopt,
+    idep_mesautil,
+    idep_nir,
+    dep_llvm,
+    dep_ncurses,
+  ],
+  include_directories : [
+    inc_include,
+    inc_src,
+    inc_mapi,
+    inc_mesa,
+    inc_gallium,
+    inc_gallium_aux
+  ],
   link_with : [libglsl_standalone],
   install: true
 )
