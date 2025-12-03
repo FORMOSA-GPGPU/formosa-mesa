@@ -230,6 +230,8 @@ initialize_context(struct gl_context *ctx, gl_api api)
       ctx->Const.MaxVarying = 60 / 4;
       break;
    case 300:
+   case 310:
+   case 320:
       ctx->Const.MaxClipPlanes = 8;
       ctx->Const.MaxCombinedTextureImageUnits = 32;
       ctx->Const.MaxDrawBuffers = 4;

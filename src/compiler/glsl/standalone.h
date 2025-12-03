@@ -39,6 +39,7 @@ struct standalone_options {
 };
 
 struct gl_shader_program;
+struct gl_context;
 
 struct gl_shader_program * standalone_compile_shader(
       const struct standalone_options *options,
