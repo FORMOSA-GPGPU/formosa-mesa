@@ -28,6 +28,8 @@ bench_run_index(FILE *fp, int i)
 {
    nir_shader_compiler_options option = {0};
    nir_shader *shader = fsa_nir_benchlist[i].fn(&option);
+   /* We dont handle vectored alu ops */
+   nir_lower_alu_to_scalar(shader, NULL, NULL);
    return fsa_standalone_nir_to_llvm(shader, fp);
 }
 

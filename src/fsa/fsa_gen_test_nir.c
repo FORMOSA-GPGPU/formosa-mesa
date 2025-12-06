@@ -61,6 +61,32 @@
       POSTAMBLE(res, MASK, TYPE)                                               \
    }
 
+/* GEN_VARIANT_TERNARY: Generates a specific vector version of a ternary op */
+#define GEN_VARIANT_TERNARY(SHORT, SUFFIX, COMPS, MASK, TYPE)                  \
+   static nir_shader *gen_##SHORT##_##SUFFIX(                                  \
+      const nir_shader_compiler_options *options)                              \
+   {                                                                           \
+      PREAMBLE(options)                                                        \
+      nir_def *src0 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_def *src1 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_def *src2 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_def *res = nir_##SHORT(&b, src0, src1, src2);                        \
+      if (res->bit_size == 1) {                                                \
+         if (nir_alu_type_get_base_type(TYPE) == nir_type_float) {             \
+            res = nir_b2f32(&b, res);                                          \
+         } else {                                                              \
+            res = nir_b2i32(&b, res);                                          \
+         }                                                                     \
+      }                                                                        \
+      POSTAMBLE(res, MASK, TYPE)                                               \
+   }
+
+#define DEFINE_TERNARY_GROUP(SHORT, TYPE)                                      \
+   GEN_VARIANT_TERNARY(SHORT, scalar, 1, 0x1, TYPE)                            \
+   GEN_VARIANT_TERNARY(SHORT, vec2, 2, 0x3, TYPE)                              \
+   GEN_VARIANT_TERNARY(SHORT, vec3, 3, 0x7, TYPE)                              \
+   GEN_VARIANT_TERNARY(SHORT, vec4, 4, 0xF, TYPE)
+
 /* * GROUP MACROS: These call the variant macros 4 times (Scalar -> Vec4)
  */
 #define DEFINE_BINARY_GROUP(SHORT, TYPE)                                       \
@@ -102,6 +128,17 @@ DEFINE_BINARY_GROUP(fsub, nir_type_float32)
 DEFINE_BINARY_GROUP(fmul, nir_type_float32)
 DEFINE_BINARY_GROUP(fmulz, nir_type_float32)
 DEFINE_BINARY_GROUP(fdiv, nir_type_float32)
+DEFINE_BINARY_GROUP(fmax, nir_type_float32)
+DEFINE_BINARY_GROUP(fmin, nir_type_float32)
+DEFINE_BINARY_GROUP(ldexp, nir_type_float32)
+DEFINE_BINARY_GROUP(bfm, nir_type_uint32)
+
+/* Ternary Operations */
+DEFINE_TERNARY_GROUP(ffma, nir_type_float32)
+DEFINE_TERNARY_GROUP(ffmaz, nir_type_float32)
+DEFINE_TERNARY_GROUP(bitfield_select, nir_type_uint32)
+DEFINE_TERNARY_GROUP(ubfe, nir_type_uint32)
+DEFINE_TERNARY_GROUP(ibfe, nir_type_int32)
 
 /* --- Unary Ops (Float & Int) --- */
 DEFINE_UNARY_GROUP(fneg, nir_type_float32)
@@ -120,6 +157,11 @@ DEFINE_UNARY_GROUP(ffract, nir_type_float32)
 DEFINE_UNARY_GROUP(fsqrt, nir_type_float32)
 DEFINE_UNARY_GROUP(fexp2, nir_type_float32)
 DEFINE_UNARY_GROUP(flog2, nir_type_float32)
+DEFINE_UNARY_GROUP(frsq, nir_type_float32)
+DEFINE_UNARY_GROUP(frexp_exp, nir_type_int32) /* Returns exponent (int) */
+DEFINE_UNARY_GROUP(frexp_sig, nir_type_float32)
+DEFINE_UNARY_GROUP(bitfield_reverse, nir_type_uint32)
+DEFINE_UNARY_GROUP(bit_count, nir_type_uint32)
 
 /* --- Comparisons (Binary Input -> Bool/Int Output) --- */
 DEFINE_BINARY_GROUP(ilt, nir_type_int32)
@@ -205,5 +247,19 @@ struct fsa_nir_microbench_struct fsa_nir_benchlist[] = {
    ENTRY_GROUP(fsqrt),
    ENTRY_GROUP(fexp2),
    ENTRY_GROUP(flog2),
+   ENTRY_GROUP(frsq),
+   ENTRY_GROUP(frexp_exp),
+   ENTRY_GROUP(frexp_sig),
+   ENTRY_GROUP(fmax),
+   ENTRY_GROUP(fmin),
+   ENTRY_GROUP(ldexp),
+   ENTRY_GROUP(ffma),
+   ENTRY_GROUP(ffmaz),
+   ENTRY_GROUP(bitfield_reverse),
+   ENTRY_GROUP(bit_count),
+   ENTRY_GROUP(bfm),
+   ENTRY_GROUP(bitfield_select),
+   ENTRY_GROUP(ubfe),
+   ENTRY_GROUP(ibfe),
    {NULL, NULL, NULL},
 };

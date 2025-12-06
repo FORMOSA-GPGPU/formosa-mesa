@@ -108,6 +108,43 @@ emit_intrin_1f_param(struct fsa_llvm_context *ctx, const char *intrin,
 }
 
 static LLVMValueRef
+emit_intrin_2f_param(struct fsa_llvm_context *ctx, const char *intrin,
+                     LLVMTypeRef result_type, LLVMValueRef src0,
+                     LLVMValueRef src1)
+{
+   char name[64], type[64];
+   LLVMValueRef params[] = {
+      fsa_to_float(ctx, src0),
+      fsa_to_float(ctx, src1),
+   };
+
+   fsa_build_type_name_for_intr(LLVMTypeOf(params[0]), type, sizeof(type));
+   ASSERTED const int length =
+      snprintf(name, sizeof(name), "%s.%s", intrin, type);
+   assert(length < sizeof(name));
+   return fsa_build_intrinsic(ctx, name, result_type, params, 2, 0);
+}
+
+static LLVMValueRef
+emit_intrin_3f_param(struct fsa_llvm_context *ctx, const char *intrin,
+                     LLVMTypeRef result_type, LLVMValueRef src0,
+                     LLVMValueRef src1, LLVMValueRef src2)
+{
+   char name[64], type[64];
+   LLVMValueRef params[] = {
+      fsa_to_float(ctx, src0),
+      fsa_to_float(ctx, src1),
+      fsa_to_float(ctx, src2),
+   };
+
+   fsa_build_type_name_for_intr(LLVMTypeOf(params[0]), type, sizeof(type));
+   ASSERTED const int length =
+      snprintf(name, sizeof(name), "%s.%s", intrin, type);
+   assert(length < sizeof(name));
+   return fsa_build_intrinsic(ctx, name, result_type, params, 3, 0);
+}
+
+static LLVMValueRef
 emit_iabs(struct fsa_llvm_context *ctx, LLVMValueRef src0)
 {
    return fsa_build_imax(ctx, src0, LLVMBuildNeg(ctx->builder, src0, ""));
@@ -195,6 +232,40 @@ emit_i2b(struct fsa_llvm_context *ctx, LLVMValueRef src0)
 {
    LLVMValueRef zero = LLVMConstNull(LLVMTypeOf(src0));
    return LLVMBuildICmp(ctx->builder, LLVMIntNE, src0, zero, "");
+}
+
+static LLVMValueRef
+emit_frsq(struct fsa_llvm_context *ctx, LLVMValueRef src, LLVMTypeRef type)
+{
+   LLVMValueRef result = emit_intrin_1f_param(ctx, "llvm.sqrt", type, src);
+   return fsa_build_floating_reciprocal(ctx, result);
+}
+
+static LLVMValueRef
+emit_bfm(struct fsa_llvm_context *ctx, LLVMValueRef bits, LLVMValueRef offset)
+{
+   /* mask = ((1 << bits) - 1) << offset */
+   return LLVMBuildShl(
+      ctx->builder,
+      LLVMBuildSub(ctx->builder,
+                   LLVMBuildShl(ctx->builder, ctx->i32_1, bits, ""), ctx->i32_1,
+                   ""),
+      offset, "");
+}
+
+static LLVMValueRef
+emit_bitfield_select(struct fsa_llvm_context *ctx, LLVMValueRef mask,
+                     LLVMValueRef insert, LLVMValueRef base)
+{
+   /* Calculate:
+    *   (mask & insert) | (~mask & base) = base ^ (mask & (insert ^ base))
+    * Use the right-hand side, which the LLVM backend can convert to V_BFI.
+    */
+   return LLVMBuildXor(
+      ctx->builder, base,
+      LLVMBuildAnd(ctx->builder, mask,
+                   LLVMBuildXor(ctx->builder, insert, base, ""), ""),
+      "");
 }
 
 static bool
@@ -434,6 +505,76 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       result =
          emit_intrin_1f_param(&ctx->fsa, "llvm.log2",
                               fsa_to_float_type(&ctx->fsa, def_type), src[0]);
+      break;
+   case nir_op_frsq:
+      src[0] = fsa_to_float(&ctx->fsa, src[0]);
+      result =
+         emit_frsq(&ctx->fsa, src[0], fsa_to_float_type(&ctx->fsa, def_type));
+      break;
+   case nir_op_frexp_exp:
+      src[0] = fsa_to_float(&ctx->fsa, src[0]);
+      result = fsa_build_frexp_exp(
+         &ctx->fsa, src[0], fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(src[0])));
+      if (fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(src[0])) == 16)
+         result = LLVMBuildSExt(ctx->fsa.builder, result, ctx->fsa.i32, "");
+      break;
+   case nir_op_frexp_sig:
+      src[0] = fsa_to_float(&ctx->fsa, src[0]);
+      result = fsa_build_frexp_mant(&ctx->fsa, src[0], instr->def.bit_size);
+      break;
+   case nir_op_fmax:
+      result = emit_intrin_2f_param(&ctx->fsa, "llvm.maxnum",
+                                    fsa_to_float_type(&ctx->fsa, def_type),
+                                    src[0], src[1]);
+      break;
+   case nir_op_fmin:
+      result = emit_intrin_2f_param(&ctx->fsa, "llvm.minnum",
+                                    fsa_to_float_type(&ctx->fsa, def_type),
+                                    src[0], src[1]);
+      break;
+   case nir_op_ffma:
+      result = emit_intrin_3f_param(&ctx->fsa, "llvm.fma",
+                                    fsa_to_float_type(&ctx->fsa, def_type),
+                                    src[0], src[1], src[2]);
+      break;
+   case nir_op_ffmaz:
+      /* zero wins in mul, regardless of nan, inf, map to ffma for
+       * simplification */
+      result = emit_intrin_3f_param(&ctx->fsa, "llvm.fma",
+                                    fsa_to_float_type(&ctx->fsa, def_type),
+                                    src[0], src[1], src[2]);
+      break;
+   case nir_op_ldexp:
+      src[0] = fsa_to_float(&ctx->fsa, src[0]);
+      if (fsa_get_elem_bits(&ctx->fsa, def_type) == 32)
+         result = fsa_build_intrinsic(&ctx->fsa, "llvm.ldexp.f32.i32",
+                                      ctx->fsa.f32, src, 2, 0);
+      else if (fsa_get_elem_bits(&ctx->fsa, def_type) == 16)
+         result = fsa_build_intrinsic(&ctx->fsa, "llvm.ldexp.f16.i32",
+                                      ctx->fsa.f16, src, 2, 0);
+      else
+         result = fsa_build_intrinsic(&ctx->fsa, "llvm.ldexp.f64.i32",
+                                      ctx->fsa.f64, src, 2, 0);
+      break;
+   case nir_op_bfm:
+      /* Bitfield move */
+      result = emit_bfm(&ctx->fsa, src[0], src[1]);
+      break;
+   case nir_op_bitfield_select:
+      result = emit_bitfield_select(&ctx->fsa, src[0], src[1], src[2]);
+      break;
+   case nir_op_ubfe:
+      /* unsigned bitfield extract */
+      result = fsa_build_bfe(&ctx->fsa, src[0], src[1], src[2], false);
+      break;
+   case nir_op_ibfe:
+      result = fsa_build_bfe(&ctx->fsa, src[0], src[1], src[2], true);
+      break;
+   case nir_op_bitfield_reverse:
+      result = fsa_build_bitfield_reverse(&ctx->fsa, src[0]);
+      break;
+   case nir_op_bit_count:
+      result = fsa_build_bit_count(&ctx->fsa, src[0]);
       break;
    case nir_op_b2f16:
    case nir_op_b2f32:

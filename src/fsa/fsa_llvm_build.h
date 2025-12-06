@@ -126,5 +126,18 @@ LLVMValueRef fsa_build_fsat(struct fsa_llvm_context *ctx, LLVMValueRef src,
 LLVMValueRef fsa_build_isign(struct fsa_llvm_context *ctx, LLVMValueRef src0);
 LLVMValueRef fsa_build_fsign(struct fsa_llvm_context *ctx, LLVMValueRef src);
 LLVMValueRef fsa_build_ffract(struct fsa_llvm_context *ctx, LLVMValueRef src);
+LLVMValueRef fsa_build_frexp_exp(struct fsa_llvm_context *ctx,
+                                 LLVMValueRef src0, unsigned bitsize);
+LLVMValueRef fsa_build_frexp_mant(struct fsa_llvm_context *ctx,
+                                  LLVMValueRef src0, unsigned bitsize);
+LLVMValueRef fsa_build_bfe(struct fsa_llvm_context *ctx, LLVMValueRef input,
+                           LLVMValueRef offset, LLVMValueRef width,
+                           bool is_signed);
+LLVMValueRef fsa_build_bitfield_reverse(struct fsa_llvm_context *ctx,
+                                        LLVMValueRef src0);
+LLVMValueRef fsa_build_bit_count(struct fsa_llvm_context *ctx,
+                                 LLVMValueRef src0);
+LLVMValueRef fsa_build_ldexp(struct fsa_llvm_context *ctx, LLVMValueRef src0,
+                             LLVMValueRef src1, unsigned bitsize);
 
 #endif

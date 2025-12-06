@@ -591,3 +591,220 @@ fsa_build_ffract(struct fsa_llvm_context *ctx, LLVMValueRef src)
 
    return LLVMBuildFSub(ctx->builder, src, floor_val, "");
 }
+
+LLVMValueRef
+fsa_build_frexp_exp(struct fsa_llvm_context *ctx, LLVMValueRef src0,
+                    unsigned bitsize)
+{
+   unsigned mantissa_bits, bias;
+   unsigned long long exp_mask;
+   LLVMTypeRef int_type;
+
+   if (bitsize == 16) {
+      mantissa_bits = 10;
+      bias = 15;
+      exp_mask = 0x1F;
+      int_type = ctx->i16;
+   } else if (bitsize == 32) {
+      mantissa_bits = 23;
+      bias = 127;
+      exp_mask = 0xFF;
+      int_type = ctx->i32;
+   } else if (bitsize == 64) {
+      mantissa_bits = 52;
+      bias = 1023;
+      exp_mask = 0x7FF;
+      int_type = ctx->i64;
+   } else {
+      unreachable("Unsupported bitwidth");
+   }
+
+   LLVMValueRef val_as_int = fsa_to_integer(ctx, src0);
+
+   LLVMValueRef shifted = LLVMBuildLShr(
+      ctx->builder, val_as_int, LLVMConstInt(int_type, mantissa_bits, 0), "");
+
+   LLVMValueRef raw_exp = LLVMBuildAnd(ctx->builder, shifted,
+                                       LLVMConstInt(int_type, exp_mask, 0), "");
+
+   /* Calc frexp exponent: (raw_exp - bias + 1) */
+   LLVMValueRef exp_i32 = LLVMBuildIntCast(ctx->builder, raw_exp, ctx->i32, "");
+   LLVMValueRef bias_val = LLVMConstInt(ctx->i32, bias, 0);
+   LLVMValueRef one = ctx->i32_1;
+
+   LLVMValueRef res = LLVMBuildSub(ctx->builder, exp_i32, bias_val, "");
+   res = LLVMBuildAdd(ctx->builder, res, one, "");
+
+   /* Handle edge case 0.0 */
+   LLVMValueRef zero_float = LLVMConstNull(LLVMTypeOf(src0));
+   LLVMValueRef is_zero =
+      LLVMBuildFCmp(ctx->builder, LLVMRealOEQ, src0, zero_float, "");
+
+   LLVMValueRef tmp = LLVMBuildSelect(ctx->builder, is_zero,
+                                      LLVMConstInt(ctx->i32, 0, 0), res, "");
+   return tmp;
+}
+
+LLVMValueRef
+fsa_build_frexp_mant(struct fsa_llvm_context *ctx, LLVMValueRef src0,
+                     unsigned bitsize)
+{
+   unsigned mantissa_bits, bias;
+   unsigned long long exp_mask; // Used to calculate the inverse mask
+   LLVMTypeRef int_type;
+   LLVMTypeRef float_type = LLVMTypeOf(src0);
+
+   if (bitsize == 16) {
+      mantissa_bits = 10;
+      bias = 15;
+      exp_mask = 0x1F;
+      int_type = ctx->i16;
+   } else if (bitsize == 32) {
+      mantissa_bits = 23;
+      bias = 127;
+      exp_mask = 0xFF;
+      int_type = ctx->i32;
+   } else if (bitsize == 64) {
+      mantissa_bits = 52;
+      bias = 1023;
+      exp_mask = 0x7FF;
+      int_type = ctx->i64;
+   } else {
+      unreachable("Unsupported bitwidth");
+   }
+
+   LLVMValueRef val_as_int = fsa_to_integer(ctx, src0);
+
+   /* * 1. Create a mask to PRESERVE the Sign and Mantissa.
+    * We do this by inverting the exponent mask shifted into position.
+    * preserve_mask = ~(exp_mask << mantissa_bits)
+    */
+   unsigned long long shifted_exp_mask = (unsigned long long)exp_mask
+                                         << mantissa_bits;
+   unsigned long long preserve_mask = ~shifted_exp_mask;
+
+   /* * 2. Calculate the new exponent bits.
+    * frexp returns [0.5, 1.0). In IEEE 754, this range corresponds
+    * to an exponent of (bias - 1).
+    */
+   unsigned long long new_exp_bits = ((unsigned long long)(bias - 1))
+                                     << mantissa_bits;
+
+   // Clear the old exponent
+   LLVMValueRef stripped = LLVMBuildAnd(
+      ctx->builder, val_as_int, LLVMConstInt(int_type, preserve_mask, 0), "");
+
+   // OR in the new exponent
+   LLVMValueRef result_int = LLVMBuildOr(
+      ctx->builder, stripped, LLVMConstInt(int_type, new_exp_bits, 0), "");
+
+   LLVMValueRef res =
+      LLVMBuildBitCast(ctx->builder, result_int, float_type, "");
+
+   /* Handle edge case 0.0 (result should be 0.0, not 0.5) */
+   LLVMValueRef zero_float = LLVMConstNull(float_type);
+   LLVMValueRef is_zero =
+      LLVMBuildFCmp(ctx->builder, LLVMRealOEQ, src0, zero_float, "");
+
+   return LLVMBuildSelect(ctx->builder, is_zero, zero_float, res, "");
+}
+
+LLVMValueRef
+fsa_build_bfe(struct fsa_llvm_context *ctx, LLVMValueRef input,
+              LLVMValueRef offset, LLVMValueRef width, bool is_signed)
+{
+   LLVMValueRef c32 = LLVMConstInt(ctx->i32, 32, 0);
+
+   /* * Calculate shift amounts:
+    * shift_left_amt = 32 - (offset + width)
+    * shift_right_amt = 32 - width
+    */
+
+   LLVMValueRef sum_off_width = LLVMBuildAdd(ctx->builder, offset, width, "");
+   LLVMValueRef shl_amt = LLVMBuildSub(ctx->builder, c32, sum_off_width, "");
+   LLVMValueRef shr_amt = LLVMBuildSub(ctx->builder, c32, width, "");
+
+   /* Shift Left to clear high bits and move field to MSB */
+   LLVMValueRef tmp = LLVMBuildShl(ctx->builder, input, shl_amt, "");
+
+   /* Shift Right to clear low bits (from original pos) and position at LSB */
+   if (is_signed) {
+      /* Arithmetic shift propagates the sign bit (SBFE) */
+      return LLVMBuildAShr(ctx->builder, tmp, shr_amt, "");
+   } else {
+      /* Logical shift fills with zeros (UBFE) */
+      return LLVMBuildLShr(ctx->builder, tmp, shr_amt, "");
+   }
+}
+
+LLVMValueRef
+fsa_build_bitfield_reverse(struct fsa_llvm_context *ctx, LLVMValueRef src0)
+{
+   LLVMValueRef result;
+   unsigned bitsize;
+
+   bitsize = fsa_get_elem_bits(ctx, LLVMTypeOf(src0));
+
+   switch (bitsize) {
+   case 64:
+      result = fsa_build_intrinsic(ctx, "llvm.bitreverse.i64", ctx->i64,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      result = LLVMBuildTrunc(ctx->builder, result, ctx->i32, "");
+      break;
+   case 32:
+      result = fsa_build_intrinsic(ctx, "llvm.bitreverse.i32", ctx->i32,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      break;
+   case 16:
+      result = fsa_build_intrinsic(ctx, "llvm.bitreverse.i16", ctx->i16,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      result = LLVMBuildZExt(ctx->builder, result, ctx->i32, "");
+      break;
+   case 8:
+      result = fsa_build_intrinsic(ctx, "llvm.bitreverse.i8", ctx->i8,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      result = LLVMBuildZExt(ctx->builder, result, ctx->i32, "");
+      break;
+   default:
+      unreachable("invalid bitsize");
+      break;
+   }
+
+   return result;
+}
+
+LLVMValueRef
+fsa_build_bit_count(struct fsa_llvm_context *ctx, LLVMValueRef src0)
+{
+   LLVMValueRef result;
+   unsigned bitsize;
+
+   bitsize = fsa_get_elem_bits(ctx, LLVMTypeOf(src0));
+
+   switch (bitsize) {
+   case 64:
+      result = fsa_build_intrinsic(ctx, "llvm.ctpop.i64", ctx->i64,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      result = LLVMBuildTrunc(ctx->builder, result, ctx->i32, "");
+      break;
+   case 32:
+      result = fsa_build_intrinsic(ctx, "llvm.ctpop.i32", ctx->i32,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      break;
+   case 16:
+      result = fsa_build_intrinsic(ctx, "llvm.ctpop.i16", ctx->i16,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      result = LLVMBuildZExt(ctx->builder, result, ctx->i32, "");
+      break;
+   case 8:
+      result = fsa_build_intrinsic(ctx, "llvm.ctpop.i8", ctx->i8,
+                                   (LLVMValueRef[]){src0}, 1, 0);
+      result = LLVMBuildZExt(ctx->builder, result, ctx->i32, "");
+      break;
+   default:
+      unreachable("invalid bitsize");
+      break;
+   }
+
+   return result;
+}
