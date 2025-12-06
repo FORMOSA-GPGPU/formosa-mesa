@@ -77,6 +77,12 @@ LLVMValueRef fsa_build_gather_values_extended(struct fsa_llvm_context *ctx,
 LLVMValueRef fsa_build_gather_values(struct fsa_llvm_context *ctx,
                                      LLVMValueRef *values,
                                      unsigned value_count);
+LLVMValueRef fsa_build_load_input_to_scalar(struct fsa_llvm_context *ctx,
+                                            LLVMValueRef addr,
+                                            LLVMValueRef scalar);
+LLVMValueRef fsa_build_load_input_to_vector(struct fsa_llvm_context *ctx,
+                                            LLVMValueRef addr, LLVMValueRef vec,
+                                            LLVMValueRef idx);
 LLVMTypeRef fsa_to_float_type(struct fsa_llvm_context *ctx, LLVMTypeRef t);
 LLVMValueRef fsa_to_float(struct fsa_llvm_context *ctx, LLVMValueRef v);
 LLVMValueRef fsa_build_intrinsic(struct fsa_llvm_context *ctx, const char *name,
@@ -91,5 +97,34 @@ LLVMTypeRef fsa_to_integer_type(struct fsa_llvm_context *ctx, LLVMTypeRef t);
 int fsa_get_elem_bits(struct fsa_llvm_context *ctx, LLVMTypeRef type);
 LLVMValueRef fsa_llvm_extract_elem(struct fsa_llvm_context *fsa,
                                    LLVMValueRef value, int index);
+LLVMValueRef fsa_get_pointer_val(struct fsa_llvm_context *ctx,
+                                 LLVMTypeRef elem_type, LLVMValueRef addr);
+void fsa_build_type_name_for_intr(LLVMTypeRef type, char *buf,
+                                  unsigned bufsize);
+LLVMValueRef fsa_build_const_int_vec(struct fsa_llvm_context *ctx,
+                                     LLVMTypeRef type, long long val,
+                                     bool sign_extend);
+LLVMValueRef fsa_const_uint_vec(struct fsa_llvm_context *ctx, LLVMTypeRef type,
+                                uint64_t value);
+LLVMValueRef fsa_build_floating_reciprocal(struct fsa_llvm_context *ctx,
+                                           LLVMValueRef value);
+LLVMValueRef fsa_build_fmin(struct fsa_llvm_context *ctx, LLVMValueRef a,
+                            LLVMValueRef b);
+LLVMValueRef fsa_build_fmax(struct fsa_llvm_context *ctx, LLVMValueRef a,
+                            LLVMValueRef b);
+LLVMValueRef fsa_build_imin(struct fsa_llvm_context *ctx, LLVMValueRef a,
+                            LLVMValueRef b);
+LLVMValueRef fsa_build_imax(struct fsa_llvm_context *ctx, LLVMValueRef a,
+                            LLVMValueRef b);
+LLVMValueRef fsa_build_umin(struct fsa_llvm_context *ctx, LLVMValueRef a,
+                            LLVMValueRef b);
+LLVMValueRef fsa_build_umax(struct fsa_llvm_context *ctx, LLVMValueRef a,
+                            LLVMValueRef b);
+LLVMValueRef fsa_build_clamp(struct fsa_llvm_context *ctx, LLVMValueRef value);
+LLVMValueRef fsa_build_fsat(struct fsa_llvm_context *ctx, LLVMValueRef src,
+                            LLVMTypeRef type);
+LLVMValueRef fsa_build_isign(struct fsa_llvm_context *ctx, LLVMValueRef src0);
+LLVMValueRef fsa_build_fsign(struct fsa_llvm_context *ctx, LLVMValueRef src);
+LLVMValueRef fsa_build_ffract(struct fsa_llvm_context *ctx, LLVMValueRef src);
 
 #endif

@@ -1,267 +1,209 @@
 #include "fsa_gen_test_nir.h"
-#include <ctype.h>
-#include <ncurses.h>
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 
-nir_shader *
-fsa_gen_add_store_without_input(const nir_shader_compiler_options *options)
-{
-   nir_shader *shader =
-      nir_shader_create(NULL, MESA_SHADER_VERTEX, options, NULL);
-
-   nir_function *func = nir_function_create(shader, "main");
-   func->is_entrypoint = true;
-
-   nir_function_impl *impl = nir_function_impl_create(func);
-   nir_block *block = nir_start_block(impl);
-   nir_builder b = nir_builder_create(impl);
-   b.cursor = nir_after_block(block);
-
-   nir_def *val_a = nir_imm_float(&b, 10.5f);
-   nir_def *val_b = nir_imm_float(&b, 20.0f);
-   nir_def *sum = nir_fadd(&b, val_a, val_b);
-
-   nir_def *offset = nir_imm_int(&b, 0);
-   nir_intrinsic_instr *store = nir_store_output(&b, sum, offset);
-   /* nir_store_output needs to set config manually */
-   nir_intrinsic_set_base(store, VARYING_SLOT_VAR0);
-   nir_intrinsic_set_write_mask(store, 0x1);
-   nir_intrinsic_set_component(store, 0);
-   nir_intrinsic_set_src_type(store, nir_type_float32);
-
-   nir_validate_shader(shader, "manual creation check");
-
-   return shader;
-}
-
-nir_shader *
-fsa_gen_load_add_store_scalar(const nir_shader_compiler_options *options)
-{
-   nir_shader *shader =
-      nir_shader_create(NULL, MESA_SHADER_VERTEX, options, NULL);
-
-   nir_function *func = nir_function_create(shader, "main");
-   func->is_entrypoint = true;
-
-   nir_function_impl *impl = nir_function_impl_create(func);
-   nir_block *block = nir_start_block(impl);
-   nir_builder b = nir_builder_create(impl);
-   b.cursor = nir_after_block(block);
-
+#define PREAMBLE(options_ptr)                                                  \
+   nir_shader *shader =                                                        \
+      nir_shader_create(NULL, MESA_SHADER_VERTEX, options_ptr, NULL);          \
+   nir_function *func = nir_function_create(shader, "main");                   \
+   func->is_entrypoint = true;                                                 \
+   nir_function_impl *impl = nir_function_impl_create(func);                   \
+   nir_block *block = nir_start_block(impl);                                   \
+   nir_builder b = nir_builder_create(impl);                                   \
+   b.cursor = nir_after_block(block);                                          \
    nir_def *const_z = nir_imm_int(&b, 0);
-   nir_def *test1 = nir_load_input(&b, 1, 32, const_z);
-   nir_def *test2 = nir_load_input(&b, 1, 32, const_z);
-   nir_def *sum = nir_fadd(&b, test1, test2);
 
-   nir_def *offset = nir_imm_int(&b, 0);
-   nir_intrinsic_instr *store = nir_store_output(&b, sum, offset);
-   /* nir_store_output needs to set config manually */
-   nir_intrinsic_set_base(store, VARYING_SLOT_VAR0);
-   nir_intrinsic_set_write_mask(store, 0x1);
-   nir_intrinsic_set_component(store, 0);
-   nir_intrinsic_set_src_type(store, nir_type_float32);
-
-   nir_validate_shader(shader, "manual creation check");
-
+#define POSTAMBLE(result, mask, type_enum)                                     \
+   nir_def *offset = nir_imm_int(&b, 0);                                       \
+   nir_intrinsic_instr *store = nir_store_output(&b, result, offset);          \
+   nir_intrinsic_set_base(store, VARYING_SLOT_VAR0);                           \
+   nir_intrinsic_set_write_mask(store, mask);                                  \
+   nir_intrinsic_set_component(store, 0);                                      \
+   nir_intrinsic_set_src_type(store, type_enum);                               \
+                                                                               \
+   nir_validate_shader(shader, "manual creation check");                       \
    return shader;
-}
 
-nir_shader *
-fsa_gen_load_add_store_vec4(const nir_shader_compiler_options *options)
-{
-   nir_shader *shader =
-      nir_shader_create(NULL, MESA_SHADER_VERTEX, options, NULL);
+/* * GEN_VARIANT_BINARY: Generates a specific vector version of a binary op
+ * ARGS:
+ * SHORT:   Short name (e.g., fadd) used for function name and builder call
+ * SUFFIX:  scalar, vec2, vec3, vec4
+ * COMPS:   Number of components (1, 2, 3, 4)
+ * MASK:    Write mask (0x1, 0x3, 0x7, 0xF)
+ * TYPE:    Output type (nir_type_float32, etc.)
+ */
+#define GEN_VARIANT_BINARY(SHORT, SUFFIX, COMPS, MASK, TYPE)                   \
+   static nir_shader *gen_##SHORT##_##SUFFIX(                                  \
+      const nir_shader_compiler_options *options)                              \
+   {                                                                           \
+      PREAMBLE(options)                                                        \
+      nir_def *src0 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_def *src1 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_def *res = nir_##SHORT(&b, src0, src1);                              \
+      if (res->bit_size == 1) {                                                \
+         if (nir_alu_type_get_base_type(TYPE) == nir_type_float) {             \
+            res = nir_b2f32(&b, res);                                          \
+         } else {                                                              \
+            res = nir_b2i32(&b, res);                                          \
+         }                                                                     \
+      }                                                                        \
+      POSTAMBLE(res, MASK, TYPE)                                               \
+   }
 
-   nir_function *func = nir_function_create(shader, "main");
-   func->is_entrypoint = true;
+/* GEN_VARIANT_UNARY: Generates a specific vector version of a unary op */
+#define GEN_VARIANT_UNARY(SHORT, SUFFIX, COMPS, MASK, TYPE)                    \
+   static nir_shader *gen_##SHORT##_##SUFFIX(                                  \
+      const nir_shader_compiler_options *options)                              \
+   {                                                                           \
+      PREAMBLE(options)                                                        \
+      nir_def *src0 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_def *res = nir_##SHORT(&b, src0);                                    \
+      POSTAMBLE(res, MASK, TYPE)                                               \
+   }
 
-   nir_function_impl *impl = nir_function_impl_create(func);
-   nir_block *block = nir_start_block(impl);
-   nir_builder b = nir_builder_create(impl);
-   b.cursor = nir_after_block(block);
+/* * GROUP MACROS: These call the variant macros 4 times (Scalar -> Vec4)
+ */
+#define DEFINE_BINARY_GROUP(SHORT, TYPE)                                       \
+   GEN_VARIANT_BINARY(SHORT, scalar, 1, 0x1, TYPE)                             \
+   GEN_VARIANT_BINARY(SHORT, vec2, 2, 0x3, TYPE)                               \
+   GEN_VARIANT_BINARY(SHORT, vec3, 3, 0x7, TYPE)                               \
+   GEN_VARIANT_BINARY(SHORT, vec4, 4, 0xF, TYPE)
 
-   nir_def *const_z = nir_imm_int(&b, 0);
-   nir_def *test1 = nir_load_input(&b, 4, 32, const_z);
-   nir_def *test2 = nir_load_input(&b, 4, 32, const_z);
-   nir_def *sum = nir_fadd(&b, test1, test2);
+#define DEFINE_UNARY_GROUP(SHORT, TYPE)                                        \
+   GEN_VARIANT_UNARY(SHORT, scalar, 1, 0x1, TYPE)                              \
+   GEN_VARIANT_UNARY(SHORT, vec2, 2, 0x3, TYPE)                                \
+   GEN_VARIANT_UNARY(SHORT, vec3, 3, 0x7, TYPE)                                \
+   GEN_VARIANT_UNARY(SHORT, vec4, 4, 0xF, TYPE)
 
-   nir_def *offset = nir_imm_int(&b, 0);
-   nir_intrinsic_instr *store = nir_store_output(&b, sum, offset);
-   nir_intrinsic_set_base(store, VARYING_SLOT_VAR0);
-   nir_intrinsic_set_write_mask(store, 0b1111);
-   nir_intrinsic_set_component(store, 0);
-   nir_intrinsic_set_src_type(store, nir_type_float32);
+/* --- Integer/Logic Binary Ops --- */
+DEFINE_BINARY_GROUP(iadd, nir_type_int32)
+DEFINE_BINARY_GROUP(uadd_sat, nir_type_uint32)
+DEFINE_BINARY_GROUP(iadd_sat, nir_type_int32)
+DEFINE_BINARY_GROUP(usub_sat, nir_type_uint32)
+DEFINE_BINARY_GROUP(isub_sat, nir_type_int32)
+DEFINE_BINARY_GROUP(isub, nir_type_int32)
+DEFINE_BINARY_GROUP(imul, nir_type_int32)
+DEFINE_BINARY_GROUP(imul24_relaxed, nir_type_int32)
+DEFINE_BINARY_GROUP(umul24_relaxed, nir_type_uint32)
+DEFINE_BINARY_GROUP(iand, nir_type_int32)
+DEFINE_BINARY_GROUP(ior, nir_type_int32)
+DEFINE_BINARY_GROUP(ixor, nir_type_int32)
+DEFINE_BINARY_GROUP(ishl, nir_type_int32)
+DEFINE_BINARY_GROUP(ishr, nir_type_int32)
+DEFINE_BINARY_GROUP(ushr, nir_type_uint32)
+DEFINE_BINARY_GROUP(imax, nir_type_int32)
+DEFINE_BINARY_GROUP(imin, nir_type_int32)
+DEFINE_BINARY_GROUP(umax, nir_type_uint32)
+DEFINE_BINARY_GROUP(umin, nir_type_uint32)
 
-   nir_validate_shader(shader, "manual creation check");
+/* --- Float Binary Ops --- */
+DEFINE_BINARY_GROUP(fadd, nir_type_float32)
+DEFINE_BINARY_GROUP(fsub, nir_type_float32)
+DEFINE_BINARY_GROUP(fmul, nir_type_float32)
+DEFINE_BINARY_GROUP(fmulz, nir_type_float32)
+DEFINE_BINARY_GROUP(fdiv, nir_type_float32)
 
-   return shader;
-}
+/* --- Unary Ops (Float & Int) --- */
+DEFINE_UNARY_GROUP(fneg, nir_type_float32)
+DEFINE_UNARY_GROUP(inot, nir_type_int32)
+DEFINE_UNARY_GROUP(frcp, nir_type_float32)
+DEFINE_UNARY_GROUP(fabs, nir_type_float32)
+DEFINE_UNARY_GROUP(fsat, nir_type_float32)
+DEFINE_UNARY_GROUP(iabs, nir_type_int32)
+DEFINE_UNARY_GROUP(isign, nir_type_int32)
+DEFINE_UNARY_GROUP(fsign, nir_type_float32)
+DEFINE_UNARY_GROUP(ffloor, nir_type_float32)
+DEFINE_UNARY_GROUP(ftrunc, nir_type_float32)
+DEFINE_UNARY_GROUP(fceil, nir_type_float32)
+DEFINE_UNARY_GROUP(fround_even, nir_type_float32)
+DEFINE_UNARY_GROUP(ffract, nir_type_float32)
+DEFINE_UNARY_GROUP(fsqrt, nir_type_float32)
+DEFINE_UNARY_GROUP(fexp2, nir_type_float32)
+DEFINE_UNARY_GROUP(flog2, nir_type_float32)
 
-nir_shader *
-fsa_gen_load_add_store_vec3(const nir_shader_compiler_options *options)
-{
-   nir_shader *shader =
-      nir_shader_create(NULL, MESA_SHADER_VERTEX, options, NULL);
+/* --- Comparisons (Binary Input -> Bool/Int Output) --- */
+DEFINE_BINARY_GROUP(ilt, nir_type_int32)
+DEFINE_BINARY_GROUP(ine, nir_type_int32)
+DEFINE_BINARY_GROUP(ieq, nir_type_int32)
+DEFINE_BINARY_GROUP(ige, nir_type_int32)
+DEFINE_BINARY_GROUP(ult, nir_type_uint32)
+DEFINE_BINARY_GROUP(uge, nir_type_uint32)
+DEFINE_BINARY_GROUP(feq, nir_type_int32)
+DEFINE_BINARY_GROUP(fneu, nir_type_int32)
+DEFINE_BINARY_GROUP(fequ, nir_type_int32)
+DEFINE_BINARY_GROUP(fneo, nir_type_int32)
+DEFINE_BINARY_GROUP(flt, nir_type_int32)
+DEFINE_BINARY_GROUP(fge, nir_type_int32)
+DEFINE_BINARY_GROUP(fltu, nir_type_int32)
+DEFINE_BINARY_GROUP(fgeu, nir_type_int32)
+DEFINE_BINARY_GROUP(funord, nir_type_int32)
+DEFINE_BINARY_GROUP(ford, nir_type_int32)
 
-   nir_function *func = nir_function_create(shader, "main");
-   func->is_entrypoint = true;
+#define ENTRY(SHORT, SUFFIX, DESC_PREFIX)                                      \
+   {                                                                           \
+      #SHORT "_" #SUFFIX, DESC_PREFIX "-load," #SHORT ",store",                \
+         gen_##SHORT##_##SUFFIX                                                \
+   }
 
-   nir_function_impl *impl = nir_function_impl_create(func);
-   nir_block *block = nir_start_block(impl);
-   nir_builder b = nir_builder_create(impl);
-   b.cursor = nir_after_block(block);
-
-   nir_def *const_z = nir_imm_int(&b, 0);
-   nir_def *test1 = nir_load_input(&b, 3, 32, const_z);
-   nir_def *test2 = nir_load_input(&b, 3, 32, const_z);
-   nir_def *sum = nir_fadd(&b, test1, test2);
-
-   nir_def *offset = nir_imm_int(&b, 0);
-   nir_intrinsic_instr *store = nir_store_output(&b, sum, offset);
-   nir_intrinsic_set_base(store, VARYING_SLOT_VAR0);
-   nir_intrinsic_set_write_mask(store, 0b111);
-   nir_intrinsic_set_component(store, 0);
-   nir_intrinsic_set_src_type(store, nir_type_float32);
-
-   nir_validate_shader(shader, "manual creation check");
-
-   return shader;
-}
+#define ENTRY_GROUP(SHORT)                                                     \
+   ENTRY(SHORT, scalar, "Scalar"), ENTRY(SHORT, vec2, "Vec2"),                 \
+      ENTRY(SHORT, vec3, "Vec3"), ENTRY(SHORT, vec4, "Vec4")
 
 struct fsa_nir_microbench_struct fsa_nir_benchlist[] = {
-   {"load_add_store_scalar", "Scalar-load,fadd,store",
-    fsa_gen_load_add_store_scalar},
-   {"load_add_store_vec3", "Vec3-load,fadd,store", fsa_gen_load_add_store_vec3},
-   {"load_add_store_vec4", "Vec4-load,fadd,store", fsa_gen_load_add_store_vec4},
+   ENTRY_GROUP(fneg),
+   ENTRY_GROUP(inot),
+   ENTRY_GROUP(iadd),
+   ENTRY_GROUP(uadd_sat),
+   ENTRY_GROUP(iadd_sat),
+   ENTRY_GROUP(usub_sat),
+   ENTRY_GROUP(isub_sat),
+   ENTRY_GROUP(fsub),
+   ENTRY_GROUP(isub),
+   ENTRY_GROUP(imul),
+   ENTRY_GROUP(imul24_relaxed),
+   ENTRY_GROUP(umul24_relaxed),
+   ENTRY_GROUP(fmul),
+   ENTRY_GROUP(fmulz),
+   ENTRY_GROUP(frcp),
+   ENTRY_GROUP(iand),
+   ENTRY_GROUP(ior),
+   ENTRY_GROUP(ixor),
+   ENTRY_GROUP(ishl),
+   ENTRY_GROUP(ishr),
+   ENTRY_GROUP(ushr),
+   ENTRY_GROUP(ilt),
+   ENTRY_GROUP(ine),
+   ENTRY_GROUP(ieq),
+   ENTRY_GROUP(ige),
+   ENTRY_GROUP(ult),
+   ENTRY_GROUP(uge),
+   ENTRY_GROUP(fdiv),
+   ENTRY_GROUP(feq),
+   ENTRY_GROUP(fneu),
+   ENTRY_GROUP(fequ),
+   ENTRY_GROUP(fneo),
+   ENTRY_GROUP(flt),
+   ENTRY_GROUP(fge),
+   ENTRY_GROUP(fltu),
+   ENTRY_GROUP(fgeu),
+   ENTRY_GROUP(funord),
+   ENTRY_GROUP(ford),
+   ENTRY_GROUP(fabs),
+   ENTRY_GROUP(fsat),
+   ENTRY_GROUP(iabs),
+   ENTRY_GROUP(imax),
+   ENTRY_GROUP(imin),
+   ENTRY_GROUP(umax),
+   ENTRY_GROUP(umin),
+   ENTRY_GROUP(isign),
+   ENTRY_GROUP(fsign),
+   ENTRY_GROUP(ffloor),
+   ENTRY_GROUP(ftrunc),
+   ENTRY_GROUP(fceil),
+   ENTRY_GROUP(fround_even),
+   ENTRY_GROUP(ffract),
+   ENTRY_GROUP(fsqrt),
+   ENTRY_GROUP(fexp2),
+   ENTRY_GROUP(flog2),
    {NULL, NULL, NULL},
 };
-
-int
-fsa_bench_count()
-{
-   int i = 0;
-   while (fsa_nir_benchlist[i].name != NULL)
-      i++;
-   return i;
-}
-
-static int
-is_fuzzy_match(const char *pattern, const char *str)
-{
-   while (*pattern) {
-      if (!*str)
-         return 0;
-      if (tolower((unsigned char)*pattern) == tolower((unsigned char)*str)) {
-         pattern++;
-      }
-      str++;
-   }
-   return 1;
-}
-
-int
-fsa_select_bench_interactive()
-{
-   int total_count = fsa_bench_count();
-
-   int *filtered_indices = malloc(sizeof(int) * total_count);
-   int filtered_count = 0;
-
-   char query[256] = {0};
-   int highlight = 0;
-   int choice = -1;
-   int ch;
-
-   initscr();
-   cbreak();
-   noecho();
-   curs_set(0);
-   keypad(stdscr, TRUE);
-
-   while (choice == -1) {
-      filtered_count = 0;
-      for (int i = 0; i < total_count; i++) {
-         if (is_fuzzy_match(query, fsa_nir_benchlist[i].name)) {
-            filtered_indices[filtered_count++] = i;
-         }
-      }
-
-      if (highlight >= filtered_count)
-         highlight = (filtered_count > 0) ? filtered_count - 1 : 0;
-
-      clear();
-
-      attron(A_BOLD);
-      mvprintw(0, 0, "Search: %s_", query);
-      attroff(A_BOLD);
-      mvprintw(1, 0, "------------------------------------------------");
-
-      if (filtered_count == 0) {
-         mvprintw(3, 2, "No matches found.");
-      } else {
-         for (int i = 0; i < filtered_count; ++i) {
-            int real_idx = filtered_indices[i];
-
-            int desc_start_col = 45;
-            int max_width = COLS - desc_start_col - 1;
-
-            if (i == highlight)
-               attron(A_REVERSE);
-
-            mvprintw(i + 2, 2, "[%3d] %s", real_idx,
-                     fsa_nir_benchlist[real_idx].name);
-
-            if (i == highlight)
-               attroff(A_REVERSE);
-
-            if (max_width > 5) {
-               const char *desc = fsa_nir_benchlist[real_idx].desc;
-               mvprintw(i + 2, desc_start_col, "| %.*s", max_width - 2, desc);
-            }
-         }
-      }
-
-      refresh();
-
-      ch = getch();
-
-      switch (ch) {
-      case KEY_UP:
-         if (highlight > 0)
-            highlight--;
-         break;
-      case KEY_DOWN:
-         if (highlight < filtered_count - 1)
-            highlight++;
-         break;
-      case 10: // Enter
-         if (filtered_count > 0) {
-            choice = filtered_indices[highlight];
-         }
-         break;
-      case KEY_BACKSPACE:
-      case 127:
-      case '\b': {
-         size_t len = strlen(query);
-         if (len > 0)
-            query[len - 1] = '\0';
-         highlight = 0;
-      } break;
-      default:
-         if (isprint(ch)) {
-            size_t len = strlen(query);
-            if (len < sizeof(query) - 1) {
-               query[len] = (char)ch;
-               query[len + 1] = '\0';
-               highlight = 0;
-            }
-         }
-         break;
-      }
-   }
-
-   free(filtered_indices);
-   endwin();
-   return choice;
-}

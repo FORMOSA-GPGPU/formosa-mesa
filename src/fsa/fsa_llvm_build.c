@@ -1,6 +1,7 @@
 #include "fsa_llvm_build.h"
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <util/macros.h>
 
 void
@@ -303,4 +304,290 @@ fsa_llvm_extract_elem(struct fsa_llvm_context *fsa, LLVMValueRef value,
 
    return LLVMBuildExtractElement(fsa->builder, value,
                                   LLVMConstInt(fsa->i32, index, false), "");
+}
+
+LLVMValueRef
+fsa_get_pointer_val(struct fsa_llvm_context *ctx, LLVMTypeRef elem_type,
+                    LLVMValueRef addr)
+{
+   LLVMTypeRef ptr_type = LLVMPointerType(elem_type, 0);
+   LLVMValueRef input_ptr = LLVMBuildIntToPtr(ctx->builder, addr, ptr_type, "");
+   return input_ptr;
+}
+
+LLVMValueRef
+fsa_build_load_input_to_scalar(struct fsa_llvm_context *ctx, LLVMValueRef addr,
+                               LLVMValueRef scalar)
+{
+   LLVMTypeRef dest_type = LLVMTypeOf(scalar);
+   LLVMValueRef input_ptr = fsa_get_pointer_val(ctx, dest_type, addr);
+   return LLVMBuildLoad2(ctx->builder, dest_type, input_ptr, "");
+}
+
+LLVMValueRef
+fsa_build_load_input_to_vector(struct fsa_llvm_context *ctx, LLVMValueRef addr,
+                               LLVMValueRef vec, LLVMValueRef idx)
+{
+   /* Assume `vec` is always VectorTypeKind */
+   LLVMTypeRef dest_type = LLVMTypeOf(vec);
+   LLVMTypeRef elem_type = LLVMGetElementType(dest_type);
+   LLVMValueRef input_ptr = fsa_get_pointer_val(ctx, elem_type, addr);
+   LLVMValueRef scalar_result =
+      LLVMBuildLoad2(ctx->builder, elem_type, input_ptr, "");
+   return LLVMBuildInsertElement(ctx->builder, vec, scalar_result, idx, "");
+}
+
+void
+fsa_build_type_name_for_intr(LLVMTypeRef type, char *buf, unsigned bufsize)
+{
+   LLVMTypeRef elem_type = type;
+
+   if (LLVMGetTypeKind(type) == LLVMStructTypeKind) {
+      unsigned count = LLVMCountStructElementTypes(type);
+      int ret = snprintf(buf, bufsize, "sl_");
+      buf += ret;
+      bufsize -= ret;
+
+      LLVMTypeRef *elems = alloca(count * sizeof(LLVMTypeRef));
+      LLVMGetStructElementTypes(type, elems);
+
+      for (unsigned i = 0; i < count; i++) {
+         fsa_build_type_name_for_intr(elems[i], buf, bufsize);
+         ret = strlen(buf);
+         buf += ret;
+         bufsize -= ret;
+      }
+
+      snprintf(buf, bufsize, "s");
+      return;
+   }
+
+   assert(bufsize >= 8);
+   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+      int ret = snprintf(buf, bufsize, "v%u", LLVMGetVectorSize(type));
+      if (ret < 0) {
+         char *type_name = LLVMPrintTypeToString(type);
+         fprintf(stderr, "Error building type name for: %s\n", type_name);
+         LLVMDisposeMessage(type_name);
+         return;
+      }
+      elem_type = LLVMGetElementType(type);
+      buf += ret;
+      bufsize -= ret;
+   }
+   switch (LLVMGetTypeKind(elem_type)) {
+   default:
+      break;
+   case LLVMIntegerTypeKind:
+      snprintf(buf, bufsize, "i%d", LLVMGetIntTypeWidth(elem_type));
+      break;
+   case LLVMHalfTypeKind:
+      snprintf(buf, bufsize, "f16");
+      break;
+   case LLVMFloatTypeKind:
+      snprintf(buf, bufsize, "f32");
+      break;
+   case LLVMDoubleTypeKind:
+      snprintf(buf, bufsize, "f64");
+      break;
+   }
+}
+
+LLVMValueRef
+fsa_build_const_int_vec(struct fsa_llvm_context *ctx, LLVMTypeRef type,
+                        long long val, bool sign_extend)
+{
+   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+      LLVMValueRef scalar =
+         LLVMConstInt(LLVMGetElementType(type), val, sign_extend);
+      unsigned vec_size = LLVMGetVectorSize(type);
+      LLVMValueRef *scalars = alloca(vec_size * sizeof(LLVMValueRef));
+
+      for (unsigned i = 0; i < vec_size; i++)
+         scalars[i] = scalar;
+      return LLVMConstVector(scalars, vec_size);
+   }
+   return LLVMConstInt(type, val, 0);
+}
+
+LLVMValueRef
+fsa_const_uint_vec(struct fsa_llvm_context *ctx, LLVMTypeRef type,
+                   uint64_t value)
+{
+
+   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+      LLVMValueRef scalar = LLVMConstInt(LLVMGetElementType(type), value, 0);
+      unsigned vec_size = LLVMGetVectorSize(type);
+      LLVMValueRef *scalars = alloca(vec_size * sizeof(LLVMValueRef));
+
+      for (unsigned i = 0; i < vec_size; i++)
+         scalars[i] = scalar;
+      return LLVMConstVector(scalars, vec_size);
+   }
+   return LLVMConstInt(type, value, 0);
+}
+
+LLVMValueRef
+fsa_build_floating_reciprocal(struct fsa_llvm_context *ctx, LLVMValueRef value)
+{
+   LLVMValueRef f32_1 = ctx->f32_1;
+   LLVMValueRef LHS = f32_1;
+   if (LLVMGetTypeKind(LLVMTypeOf(value)) == LLVMVectorTypeKind) {
+      LLVMValueRef elems[4];
+      unsigned vsize = LLVMGetVectorSize(LLVMTypeOf(value));
+      for (unsigned i = 0; i < vsize; i++) {
+         elems[i] = f32_1;
+      }
+      LHS = LLVMConstVector(elems, vsize);
+   }
+   return LLVMBuildFDiv(ctx->builder, LHS, value, "");
+}
+
+LLVMValueRef
+fsa_build_fmin(struct fsa_llvm_context *ctx, LLVMValueRef a, LLVMValueRef b)
+{
+   char name[64], type[64];
+
+   fsa_build_type_name_for_intr(LLVMTypeOf(a), type, sizeof(type));
+   snprintf(name, sizeof(name), "llvm.minnum.%s", type);
+   LLVMValueRef args[2] = {a, b};
+   return fsa_build_intrinsic(ctx, name, LLVMTypeOf(a), args, 2, 0);
+}
+
+LLVMValueRef
+fsa_build_fmax(struct fsa_llvm_context *ctx, LLVMValueRef a, LLVMValueRef b)
+{
+   char name[64], type[64];
+
+   fsa_build_type_name_for_intr(LLVMTypeOf(a), type, sizeof(type));
+   snprintf(name, sizeof(name), "llvm.maxnum.%s", type);
+   LLVMValueRef args[2] = {a, b};
+   return fsa_build_intrinsic(ctx, name, LLVMTypeOf(a), args, 2, 0);
+}
+
+LLVMValueRef
+fsa_build_imin(struct fsa_llvm_context *ctx, LLVMValueRef a, LLVMValueRef b)
+{
+   LLVMValueRef cmp = LLVMBuildICmp(ctx->builder, LLVMIntSLE, a, b, "");
+   return LLVMBuildSelect(ctx->builder, cmp, a, b, "");
+}
+
+LLVMValueRef
+fsa_build_imax(struct fsa_llvm_context *ctx, LLVMValueRef a, LLVMValueRef b)
+{
+   LLVMValueRef cmp = LLVMBuildICmp(ctx->builder, LLVMIntSGT, a, b, "");
+   return LLVMBuildSelect(ctx->builder, cmp, a, b, "");
+}
+
+LLVMValueRef
+fsa_build_umin(struct fsa_llvm_context *ctx, LLVMValueRef a, LLVMValueRef b)
+{
+   LLVMValueRef cmp = LLVMBuildICmp(ctx->builder, LLVMIntULE, a, b, "");
+   return LLVMBuildSelect(ctx->builder, cmp, a, b, "");
+}
+
+LLVMValueRef
+fsa_build_umax(struct fsa_llvm_context *ctx, LLVMValueRef a, LLVMValueRef b)
+{
+   LLVMValueRef cmp = LLVMBuildICmp(ctx->builder, LLVMIntUGE, a, b, "");
+   return LLVMBuildSelect(ctx->builder, cmp, a, b, "");
+}
+
+LLVMValueRef
+fsa_build_clamp(struct fsa_llvm_context *ctx, LLVMValueRef value)
+{
+   LLVMTypeRef t = LLVMTypeOf(value);
+   return fsa_build_fmin(ctx, fsa_build_fmax(ctx, value, LLVMConstReal(t, 0.0)),
+                         LLVMConstReal(t, 1.0));
+}
+
+LLVMValueRef
+fsa_build_fsat(struct fsa_llvm_context *ctx, LLVMValueRef src, LLVMTypeRef type)
+{
+   LLVMValueRef zero = LLVMConstReal(type, 0.0);
+   LLVMValueRef one = LLVMConstReal(type, 1.0);
+   LLVMValueRef result;
+
+   result = fsa_build_fmin(ctx, fsa_build_fmax(ctx, src, zero), one);
+   return result;
+}
+
+LLVMValueRef
+fsa_build_isign(struct fsa_llvm_context *ctx, LLVMValueRef src0)
+{
+   LLVMTypeRef type = LLVMTypeOf(src0);
+   LLVMValueRef val;
+
+   val = fsa_build_imax(ctx, src0, fsa_const_uint_vec(ctx, type, -1));
+   return fsa_build_imin(ctx, val, fsa_const_uint_vec(ctx, type, 1));
+}
+
+static LLVMValueRef
+fsa_eliminate_negative_zero(struct fsa_llvm_context *ctx, LLVMValueRef val)
+{
+   /* I have ignored the [enable/disable]_signed_zeros functions, they are
+    * located at ac_llvm_helper.cpp*/
+   // fsa_enable_signed_zeros(ctx);
+   /* (val + 0) converts negative zero to positive zero. */
+   val = LLVMBuildFAdd(ctx->builder, val, LLVMConstNull(LLVMTypeOf(val)), "");
+   // fsa_disable_signed_zeros(ctx);
+   return val;
+}
+
+LLVMValueRef
+fsa_build_fsign(struct fsa_llvm_context *ctx, LLVMValueRef src)
+{
+   LLVMTypeRef type = LLVMTypeOf(src);
+   LLVMValueRef pos, neg, dw[2], val;
+   unsigned bitsize = fsa_get_elem_bits(ctx, type);
+
+   /* The standard version leads to this:
+    *   v_cmp_ngt_f32_e64 s[0:1], s4, 0                       ; D40B0000
+    * 00010004 v_cndmask_b32_e64 v4, 1.0, s4, s[0:1]                 ; D5010004
+    * 000008F2 v_cmp_le_f32_e32 vcc, 0, v4                           ; 7C060880
+    *   v_cndmask_b32_e32 v4, -1.0, v4, vcc                   ; 020808F3
+    *
+    * The isign version:
+    *   v_add_f32_e64 v4, s4, 0                               ; D5030004
+    * 00010004 v_med3_i32 v4, v4, -1, 1                              ; D5580004
+    * 02058304 v_cvt_f32_i32_e32 v4, v4                              ; 7E080B04
+    *
+    * (src0 + 0) converts negative zero to positive zero.
+    * After that, int(fsign(x)) == isign(floatBitsToInt(x)).
+    *
+    * For FP64, use the standard version, which doesn't suffer from the huge DP
+    * rate reduction. (FP64 comparisons are as fast as int64 comparisons)
+    */
+   if (bitsize == 16 || bitsize == 32) {
+      val = fsa_to_integer(ctx, fsa_eliminate_negative_zero(ctx, src));
+      val = fsa_build_isign(ctx, val);
+      return LLVMBuildSIToFP(ctx->builder, val, type, "");
+   }
+
+   assert(bitsize == 64);
+   pos = LLVMBuildFCmp(ctx->builder, LLVMRealOGT, src, ctx->f64_0, "");
+   neg = LLVMBuildFCmp(ctx->builder, LLVMRealOLT, src, ctx->f64_0, "");
+   dw[0] = ctx->i32_0;
+   dw[1] = LLVMBuildSelect(
+      ctx->builder, pos, LLVMConstInt(ctx->i32, 0x3FF00000, 0),
+      LLVMBuildSelect(ctx->builder, neg, LLVMConstInt(ctx->i32, 0xBFF00000, 0),
+                      ctx->i32_0, ""),
+      "");
+   return LLVMBuildBitCast(ctx->builder, fsa_build_gather_values(ctx, dw, 2),
+                           ctx->f64, "");
+}
+
+LLVMValueRef
+fsa_build_ffract(struct fsa_llvm_context *ctx, LLVMValueRef src)
+{
+   char name[64], type[64];
+
+   fsa_build_type_name_for_intr(LLVMTypeOf(src), type, sizeof(type));
+   snprintf(name, sizeof(name), "llvm.floor.%s", type);
+
+   LLVMValueRef args[1] = {src};
+   LLVMValueRef floor_val =
+      fsa_build_intrinsic(ctx, name, LLVMTypeOf(src), args, 1, 0);
+
+   return LLVMBuildFSub(ctx->builder, src, floor_val, "");
 }

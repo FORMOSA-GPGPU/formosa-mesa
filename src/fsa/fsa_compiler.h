@@ -25,7 +25,7 @@ void fsa_compiler_cleanup(struct gl_shader_program *prog);
 void fsa_compiler_operation(struct gl_shader_program *whole_prog,
                             const struct fsa_options *options);
 
-void fsa_standalone_nir_to_llvm(nir_shader *shader);
+int fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp);
 
 #ifdef __cplusplus
 }

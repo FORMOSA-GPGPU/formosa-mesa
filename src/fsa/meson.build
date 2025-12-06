@@ -4,7 +4,9 @@ files_fsa_compiler= files(
   'fsa_nir_to_llvm.c',
   'fsa_llvm_build.c',
   'fsa_gen_test_nir.c',
-  'argparse.c'
+  'fsa_ubench_menu.c',
+  'fsa_bench.c',
+  'argparse.c',
 )
 
 dep_ncurses = dependency('ncurses')
