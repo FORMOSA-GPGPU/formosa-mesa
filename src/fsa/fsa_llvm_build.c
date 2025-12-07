@@ -808,3 +808,217 @@ fsa_build_bit_count(struct fsa_llvm_context *ctx, LLVMValueRef src0)
 
    return result;
 }
+
+LLVMValueRef
+fsa_find_lsb(struct fsa_llvm_context *ctx, LLVMTypeRef dst_type,
+             LLVMValueRef src0)
+{
+   unsigned src0_bitsize = fsa_get_elem_bits(ctx, LLVMTypeOf(src0));
+   const char *intrin_name;
+   LLVMTypeRef type;
+   LLVMValueRef zero;
+
+   switch (src0_bitsize) {
+   case 64:
+      intrin_name = "llvm.cttz.i64";
+      type = ctx->i64;
+      zero = ctx->i64_0;
+      break;
+   case 32:
+      intrin_name = "llvm.cttz.i32";
+      type = ctx->i32;
+      zero = ctx->i32_0;
+      break;
+   case 16:
+      intrin_name = "llvm.cttz.i16";
+      type = ctx->i16;
+      zero = ctx->i16_0;
+      break;
+   case 8:
+      intrin_name = "llvm.cttz.i8";
+      type = ctx->i8;
+      zero = ctx->i8_0;
+      break;
+   default:
+      unreachable("invalid bitsize");
+   }
+
+   LLVMValueRef params[2] = {
+      src0,
+
+      /* The value of 1 means that ffs(x=0) = undef, so LLVM won't
+       * add special code to check for x=0. The reason is that
+       * the LLVM behavior for x=0 is different from what we
+       * need here. However, LLVM also assumes that ffs(x) is
+       * in [0, 31], but GLSL expects that ffs(0) = -1, so
+       * a conditional assignment to handle 0 is still required.
+       *
+       * The hardware already implements the correct behavior.
+       */
+      ctx->i1true,
+   };
+
+   LLVMValueRef lsb = fsa_build_intrinsic(ctx, intrin_name, type, params, 2, 0);
+
+   if (src0_bitsize == 64) {
+      lsb = LLVMBuildTrunc(ctx->builder, lsb, ctx->i32, "");
+   } else if (src0_bitsize < 32) {
+      lsb = LLVMBuildSExt(ctx->builder, lsb, ctx->i32, "");
+   }
+
+   /* TODO: We need an intrinsic to skip this conditional. */
+   /* Check for zero: */
+   return LLVMBuildSelect(
+      ctx->builder, LLVMBuildICmp(ctx->builder, LLVMIntEQ, src0, zero, ""),
+      LLVMConstInt(ctx->i32, -1, 0), lsb, "");
+}
+
+LLVMValueRef
+ac_build_umsb(struct fsa_llvm_context *ctx, LLVMValueRef arg,
+              LLVMTypeRef dst_type, bool rev)
+{
+   const char *intrin_name;
+   LLVMTypeRef type;
+   LLVMValueRef highest_bit;
+   LLVMValueRef zero;
+   unsigned bitsize;
+
+   bitsize = fsa_get_elem_bits(ctx, LLVMTypeOf(arg));
+   switch (bitsize) {
+   case 64:
+      intrin_name = "llvm.ctlz.i64";
+      type = ctx->i64;
+      highest_bit = LLVMConstInt(ctx->i64, 63, false);
+      zero = ctx->i64_0;
+      break;
+   case 32:
+      intrin_name = "llvm.ctlz.i32";
+      type = ctx->i32;
+      highest_bit = LLVMConstInt(ctx->i32, 31, false);
+      zero = ctx->i32_0;
+      break;
+   case 16:
+      intrin_name = "llvm.ctlz.i16";
+      type = ctx->i16;
+      highest_bit = LLVMConstInt(ctx->i16, 15, false);
+      zero = ctx->i16_0;
+      break;
+   case 8:
+      intrin_name = "llvm.ctlz.i8";
+      type = ctx->i8;
+      highest_bit = LLVMConstInt(ctx->i8, 7, false);
+      zero = ctx->i8_0;
+      break;
+   default:
+      unreachable("invalid bitsize");
+      break;
+   }
+
+   LLVMValueRef params[2] = {
+      arg,
+      ctx->i1true,
+   };
+
+   LLVMValueRef msb = fsa_build_intrinsic(ctx, intrin_name, type, params, 2, 0);
+
+   if (!rev) {
+      /* The HW returns the last bit index from MSB, but TGSI/NIR wants
+       * the index from LSB. Invert it by doing "31 - msb". */
+      msb = LLVMBuildSub(ctx->builder, highest_bit, msb, "");
+   }
+
+   if (bitsize == 64) {
+      msb = LLVMBuildTrunc(ctx->builder, msb, ctx->i32, "");
+   } else if (bitsize < 32) {
+      msb = LLVMBuildSExt(ctx->builder, msb, ctx->i32, "");
+   }
+
+   /* check for zero */
+   return LLVMBuildSelect(ctx->builder,
+                          LLVMBuildICmp(ctx->builder, LLVMIntEQ, arg, zero, ""),
+                          LLVMConstInt(ctx->i32, -1, true), msb, "");
+}
+
+LLVMValueRef
+fsa_build_imsb(struct fsa_llvm_context *ctx, LLVMValueRef arg,
+               LLVMTypeRef dst_type, bool rev)
+{
+   const char *intrin_name;
+   LLVMTypeRef type;
+   LLVMValueRef highest_bit;
+   LLVMValueRef zero;
+   unsigned bitsize;
+
+   bitsize = fsa_get_elem_bits(ctx, LLVMTypeOf(arg));
+   switch (bitsize) {
+   case 64:
+      intrin_name = "llvm.ctlz.i64";
+      type = ctx->i64;
+      highest_bit = LLVMConstInt(ctx->i64, 63, false);
+      zero = ctx->i64_0;
+      break;
+   case 32:
+      intrin_name = "llvm.ctlz.i32";
+      type = ctx->i32;
+      highest_bit = LLVMConstInt(ctx->i32, 31, false);
+      zero = ctx->i32_0;
+      break;
+   case 16:
+      intrin_name = "llvm.ctlz.i16";
+      type = ctx->i16;
+      highest_bit = LLVMConstInt(ctx->i16, 15, false);
+      zero = ctx->i16_0;
+      break;
+   case 8:
+      intrin_name = "llvm.ctlz.i8";
+      type = ctx->i8;
+      highest_bit = LLVMConstInt(ctx->i8, 7, false);
+      zero = ctx->i8_0;
+      break;
+   default:
+      unreachable("invalid bitsize");
+      break;
+   }
+
+   /* For signed MSB:
+    * If arg is positive, we look for the highest set bit.
+    * If arg is negative, we look for the highest cleared bit (by inverting arg).
+    */
+   LLVMValueRef is_negative =
+      LLVMBuildICmp(ctx->builder, LLVMIntSLT, arg, zero, "");
+   LLVMValueRef not_arg = LLVMBuildNot(ctx->builder, arg, "");
+   LLVMValueRef search_val =
+      LLVMBuildSelect(ctx->builder, is_negative, not_arg, arg, "");
+
+   LLVMValueRef params[2] = {
+      search_val,
+      ctx->i1true, /* is_zero_undef = true (handled manually below) */
+   };
+
+   /* This returns the number of leading zeros (from MSB) on the absolute-ish
+    * value */
+   LLVMValueRef msb = fsa_build_intrinsic(ctx, intrin_name, type, params, 2, 0);
+
+   if (!rev) {
+      /* The HW returns the last bit index from MSB, but TGSI/NIR wants
+       * the index from LSB. Invert it by doing "bitsize - 1 - msb". */
+      msb = LLVMBuildSub(ctx->builder, highest_bit, msb, "");
+   }
+
+   if (bitsize == 64) {
+      msb = LLVMBuildTrunc(ctx->builder, msb, ctx->i32, "");
+   } else if (bitsize < 32) {
+      msb = LLVMBuildSExt(ctx->builder, msb, ctx->i32, "");
+   }
+
+   /* Edge case handling:
+    * If arg is 0, search_val is 0.
+    * If arg is -1, search_val is ~(-1) = 0.
+    * In both cases, standard behavior returns -1.
+    */
+   LLVMValueRef is_zero =
+      LLVMBuildICmp(ctx->builder, LLVMIntEQ, search_val, zero, "");
+
+   return LLVMBuildSelect(ctx->builder, is_zero,
+                          LLVMConstInt(ctx->i32, -1, true), msb, "");
+}

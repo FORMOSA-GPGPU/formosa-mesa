@@ -30,6 +30,8 @@ bench_run_index(FILE *fp, int i)
    nir_shader *shader = fsa_nir_benchlist[i].fn(&option);
    /* We dont handle vectored alu ops */
    nir_lower_alu_to_scalar(shader, NULL, NULL);
+   nir_lower_io_to_scalar(shader, 0, NULL, NULL);
+   nir_lower_load_const_to_scalar(shader);
    return fsa_standalone_nir_to_llvm(shader, fp);
 }
 
@@ -117,10 +119,10 @@ cmd_bench(int argc, const char **argv)
    };
 
    struct argparse argparse;
-   argparse_init(&argparse, options, bench_usages, 0);
+   argparse_init(&argparse, options, bench_usages, ARGPARSE_STOP_AT_NON_OPTION);
    argparse_describe(&argparse, "\nFSA compiler benchmark suite", "");
 
-   argc = argparse_parse(&argparse, argc, argv);
+   int remainging_argc = argparse_parse(&argparse, argc, argv);
 
    if (argc < 1) {
       argparse_usage(&argparse);
@@ -128,9 +130,9 @@ cmd_bench(int argc, const char **argv)
    }
 
    if (!strncmp(argv[0], "search", 6)) {
-      return bench_search(argc, argv);
+      return bench_search(remainging_argc, argv);
    } else if (!strncmp(argv[0], "run", 3)) {
-      return bench_run(argc, argv);
+      return bench_run(remainging_argc, argv);
    }
    return 0;
 }

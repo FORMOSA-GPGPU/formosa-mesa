@@ -139,5 +139,11 @@ LLVMValueRef fsa_build_bit_count(struct fsa_llvm_context *ctx,
                                  LLVMValueRef src0);
 LLVMValueRef fsa_build_ldexp(struct fsa_llvm_context *ctx, LLVMValueRef src0,
                              LLVMValueRef src1, unsigned bitsize);
+LLVMValueRef fsa_find_lsb(struct fsa_llvm_context *ctx, LLVMTypeRef dst_type,
+                          LLVMValueRef src0);
+LLVMValueRef ac_build_umsb(struct fsa_llvm_context *ctx, LLVMValueRef arg,
+                           LLVMTypeRef dst_type, bool rev);
+LLVMValueRef fsa_build_imsb(struct fsa_llvm_context *ctx, LLVMValueRef arg,
+                            LLVMTypeRef dst_type, bool rev);
 
 #endif
