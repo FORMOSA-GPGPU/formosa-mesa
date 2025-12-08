@@ -21,6 +21,16 @@ struct fsa_nir_context {
    struct hash_table *defs;
 };
 
+void
+fsa_print_llvm_module(LLVMModuleRef module, FILE *fp)
+{
+   if (!fp)
+      return;
+   char *ir_str = LLVMPrintModuleToString(module);
+   fprintf(fp, "###### DUMPING LLVM IR ######\n%s\n", ir_str);
+   LLVMDisposeMessage(ir_str);
+}
+
 static LLVMTypeRef
 get_def_type(struct fsa_nir_context *ctx, const nir_def *def)
 {
@@ -364,6 +374,24 @@ emit_imul_high(struct fsa_llvm_context *ctx, LLVMValueRef src0,
    return result;
 }
 
+static LLVMValueRef
+emit_mul24(struct fsa_llvm_context *ctx, LLVMValueRef src0, LLVMValueRef src1,
+           bool sign)
+{
+   LLVMValueRef result, shamt = LLVMConstInt(ctx->i32, 8, false);
+   src0 = LLVMBuildShl(ctx->builder, src0, shamt, "");
+   src1 = LLVMBuildShl(ctx->builder, src1, shamt, "");
+   if (sign) {
+      src0 = LLVMBuildAShr(ctx->builder, src0, shamt, "");
+      src1 = LLVMBuildAShr(ctx->builder, src1, shamt, "");
+   } else {
+      src0 = LLVMBuildLShr(ctx->builder, src0, shamt, "");
+      src1 = LLVMBuildLShr(ctx->builder, src1, shamt, "");
+   }
+   result = LLVMBuildMul(ctx->builder, src0, src1, "");
+   return result;
+}
+
 static void
 nir_op_error(const nir_instr *instr, const char *msg)
 {
@@ -460,9 +488,13 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       result = LLVMBuildSub(ctx->fsa.builder, src[0], src[1], "");
       break;
    case nir_op_imul:
-   case nir_op_imul24_relaxed:
-   case nir_op_umul24_relaxed:
       result = LLVMBuildMul(ctx->fsa.builder, src[0], src[1], "");
+      break;
+   case nir_op_imul24_relaxed:
+      result = emit_mul24(&ctx->fsa, src[0], src[1], true);
+      break;
+   case nir_op_umul24_relaxed:
+      result = emit_mul24(&ctx->fsa, src[0], src[1], false);
       break;
    case nir_op_fmul:
    case nir_op_fmulz: // If one of the result is zero, result is always +0
@@ -1059,9 +1091,14 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
    return true;
 }
 
+static int load_count = 0;
+static int store_count = 0;
+
+/* fsa only deals with scalar io */
 static LLVMValueRef
 visit_load(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
+   assert(instr->def.num_components == 1);
    LLVMValueRef values[8];
    LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
    /*
@@ -1072,55 +1109,27 @@ visit_load(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
    */
    unsigned base = nir_intrinsic_base(instr);
    unsigned component = nir_intrinsic_component(instr);
-   unsigned count = instr->def.num_components;
    nir_src offset = *nir_get_io_offset_src(instr);
 
+   uint64_t addr = 0x87650000 + component * 4 + (load_count++ << 8);
+
    LLVMValueRef result = LLVMGetUndef(dest_type);
-   /* Scalar */
-   if (LLVMGetTypeKind(dest_type) != LLVMVectorTypeKind) {
-      LLVMValueRef input_addr = LLVMConstInt(ctx->fsa.i64, 87654321, 0);
-      return fsa_build_load_input_to_scalar(&ctx->fsa, input_addr, result);
-   }
-
-   /* Cector */
-   if (ctx->stage == MESA_SHADER_VERTEX) {
-      for (unsigned chan = 0; chan < count; chan++) {
-         /* Fake input address, TODO */
-         LLVMValueRef input_addr =
-            LLVMConstInt(ctx->fsa.i64, 0x87654300 + chan * 8, 0);
-         LLVMValueRef idx = LLVMConstInt(ctx->fsa.i32, chan, 0);
-         result =
-            fsa_build_load_input_to_vector(&ctx->fsa, input_addr, result, idx);
-      }
-   } else if (ctx->stage == MESA_SHADER_FRAGMENT) {
-      for (unsigned chan = 0; chan < count; chan++) {
-         /* Fake input address, TODO */
-         LLVMValueRef input_addr =
-            LLVMConstInt(ctx->fsa.i64, 0x87654300 + chan * 8, 0);
-         LLVMValueRef idx = LLVMConstInt(ctx->fsa.i32, chan, 0);
-         result =
-            fsa_build_load_input_to_vector(&ctx->fsa, input_addr, result, idx);
-      }
-   }
-
-   return result;
+   LLVMValueRef input_addr = LLVMConstInt(ctx->fsa.i64, addr, 0);
+   return fsa_build_load_input_to_scalar(&ctx->fsa, input_addr, result);
 }
 
+/* fsa only deals with scalar io */
 static void
 visit_store_output(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
+   assert(instr->src[0].ssa->num_components == 1);
    unsigned base = nir_intrinsic_base(instr);
-   unsigned writemask = nir_intrinsic_write_mask(instr);
    unsigned component = nir_intrinsic_component(instr);
    LLVMValueRef src = fsa_to_float(&ctx->fsa, get_src(ctx, instr->src[0]));
    ASSERTED unsigned bit_size = fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(src));
    ASSERTED nir_src offset = *nir_get_io_offset_src(instr);
 
    LLVMTypeRef elem_type = LLVMTypeOf(src);
-   if (LLVMGetTypeKind(elem_type) == LLVMVectorTypeKind) {
-      elem_type = LLVMGetElementType(elem_type);
-   }
-
    /*
       base = which slot
       writemask start at bit 0
@@ -1130,19 +1139,12 @@ visit_store_output(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
       writemask <<= 1 -> 0110
    */
 
-   writemask <<= component;
-
-   for (unsigned chan = 0; chan < 8; chan++) {
-      if (!(writemask & (1 << chan)))
-         continue;
-      LLVMValueRef value = fsa_llvm_extract_elem(&ctx->fsa, src, chan);
-      /* Fake output address, TODO */
-      LLVMValueRef output_addr =
-         LLVMConstInt(ctx->fsa.i64, 12345600 + chan * 8, 0);
-      LLVMValueRef output_ptr =
-         fsa_get_pointer_val(&ctx->fsa, elem_type, output_addr);
-      LLVMBuildStore(ctx->fsa.builder, value, output_ptr);
-   }
+   uint64_t addr = 0x12340000 + component * 4 + (store_count++ << 8);
+   /* Fake output address, TODO */
+   LLVMValueRef output_addr = LLVMConstInt(ctx->fsa.i64, addr, 0);
+   LLVMValueRef output_ptr =
+      fsa_get_pointer_val(&ctx->fsa, elem_type, output_addr);
+   LLVMBuildStore(ctx->fsa.builder, src, output_ptr);
 }
 
 static bool

@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/ucb-bar/berkeley-softfloat-3.git
+revision = a0c6494cdc11865811dec815d5c0049fba9d82a8
+patch_directory = berkeley-softfloat-3
+depth = 1
+
+[provide]
+berkeley-softfloat-3 = dep_libsoftfloat

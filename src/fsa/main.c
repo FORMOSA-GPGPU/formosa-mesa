@@ -32,9 +32,9 @@ main(int argc, const char **argv)
    argparse_init(&argparse, options, usages, ARGPARSE_STOP_AT_NON_OPTION);
    argparse_describe(&argparse, "fsa_compiler", NULL);
 
-   int remaining_argc = argparse_parse(&argparse, argc, argv);
+   argc = argparse_parse(&argparse, argc, argv);
 
-   if (remaining_argc < 1) {
+   if (argc < 1) {
       argparse_usage(&argparse);
       return -1;
    }
@@ -42,7 +42,7 @@ main(int argc, const char **argv)
    const char *subcommand = argv[0];
 
    if (strcmp(subcommand, "bench") == 0) {
-      return cmd_bench(remaining_argc, argv);
+      return cmd_bench(argc, argv);
    } else {
       fprintf(stderr, "Unknown subcommand: %s\n", subcommand);
       return -1;

@@ -715,32 +715,64 @@ fsa_build_frexp_mant(struct fsa_llvm_context *ctx, LLVMValueRef src0,
    return LLVMBuildSelect(ctx->builder, is_zero, zero_float, res, "");
 }
 
+/*
+   unsigned base = src0;
+   unsigned offset = src1 & 0x1F;
+   unsigned bits = src2 & 0x1F;
+   if (bits == 0) {
+      dst = 0;
+   } else if (offset + bits < 32) {
+      dst = (base << (32 - bits - offset)) >> (32 - bits);
+   } else {
+      dst = base >> offset;
+}
+*/
 LLVMValueRef
 fsa_build_bfe(struct fsa_llvm_context *ctx, LLVMValueRef input,
               LLVMValueRef offset, LLVMValueRef width, bool is_signed)
 {
+   LLVMValueRef c0 = LLVMConstInt(ctx->i32, 0, 0);
+   LLVMValueRef c1f = LLVMConstInt(ctx->i32, 0x1f, 0);
    LLVMValueRef c32 = LLVMConstInt(ctx->i32, 32, 0);
 
-   /* * Calculate shift amounts:
-    * shift_left_amt = 32 - (offset + width)
-    * shift_right_amt = 32 - width
-    */
+   offset = LLVMBuildAnd(ctx->builder, offset, c1f, "");
+   width = LLVMBuildAnd(ctx->builder, width, c1f, "");
 
+   /* Cond 1: bits == 0 */
+   LLVMValueRef cond_bits_zero =
+      LLVMBuildICmp(ctx->builder, LLVMIntEQ, width, c0, "");
+
+   /* Cond 2: offset + width < 32 */
    LLVMValueRef sum_off_width = LLVMBuildAdd(ctx->builder, offset, width, "");
+   LLVMValueRef cond_normal =
+      LLVMBuildICmp(ctx->builder, LLVMIntULT, sum_off_width, c32, "");
+
+   /* * Path A: Standard BFE (offset + bits < 32)
+    * dst = (base << (32 - bits - offset)) >> (32 - bits)
+    */
    LLVMValueRef shl_amt = LLVMBuildSub(ctx->builder, c32, sum_off_width, "");
-   LLVMValueRef shr_amt = LLVMBuildSub(ctx->builder, c32, width, "");
+   LLVMValueRef shr_amt_std = LLVMBuildSub(ctx->builder, c32, width, "");
 
-   /* Shift Left to clear high bits and move field to MSB */
-   LLVMValueRef tmp = LLVMBuildShl(ctx->builder, input, shl_amt, "");
-
-   /* Shift Right to clear low bits (from original pos) and position at LSB */
+   LLVMValueRef val_std = LLVMBuildShl(ctx->builder, input, shl_amt, "");
    if (is_signed) {
-      /* Arithmetic shift propagates the sign bit (SBFE) */
-      return LLVMBuildAShr(ctx->builder, tmp, shr_amt, "");
+      val_std = LLVMBuildAShr(ctx->builder, val_std, shr_amt_std, "");
    } else {
-      /* Logical shift fills with zeros (UBFE) */
-      return LLVMBuildLShr(ctx->builder, tmp, shr_amt, "");
+      val_std = LLVMBuildLShr(ctx->builder, val_std, shr_amt_std, "");
    }
+
+   /* * Path B: Overflow (offset + bits >= 32)
+    * dst = base >> offset
+    */
+   LLVMValueRef val_overflow;
+   if (is_signed) {
+      val_overflow = LLVMBuildAShr(ctx->builder, input, offset, "");
+   } else {
+      val_overflow = LLVMBuildLShr(ctx->builder, input, offset, "");
+   }
+   /* Choose result based on condition */
+   LLVMValueRef result =
+      LLVMBuildSelect(ctx->builder, cond_normal, val_std, val_overflow, "");
+   return LLVMBuildSelect(ctx->builder, cond_bits_zero, c0, result, "");
 }
 
 LLVMValueRef
@@ -1135,7 +1167,7 @@ fsa_build_cvt_pknorm_u16_f16(struct fsa_llvm_context *ctx, LLVMValueRef args[2])
 
 /* Helper to perform the bitwise packing: (src[0] & 0xFFFF) | (src[1] << 16) */
 static LLVMValueRef
-ac_build_pack_2x16_common(struct fsa_llvm_context *ctx, LLVMValueRef args[2])
+fsa_build_pack_2x16_common(struct fsa_llvm_context *ctx, LLVMValueRef args[2])
 {
    LLVMBuilderRef builder = ctx->builder;
 
@@ -1161,7 +1193,7 @@ ac_build_pack_2x16_common(struct fsa_llvm_context *ctx, LLVMValueRef args[2])
 LLVMValueRef
 fsa_build_pack_uint_2x16(struct fsa_llvm_context *ctx, LLVMValueRef args[2])
 {
-   return ac_build_pack_2x16_common(ctx, args);
+   return fsa_build_pack_2x16_common(ctx, args);
 }
 
 /* Signed version: nir_op_pack_sint_2x16 */
@@ -1172,74 +1204,67 @@ fsa_build_pack_sint_2x16(struct fsa_llvm_context *ctx, LLVMValueRef args[2])
    // for signed and unsigned integers.
    // e.g., -1 (0xFFFFFFFF) truncated to 16 bits is 0xFFFF.
    //       When unpacked back to i32 with sign-extension, it becomes 0xFFFFFFFF.
-   return ac_build_pack_2x16_common(ctx, args);
+   return fsa_build_pack_2x16_common(ctx, args);
 }
 
-/* Helper: Calculates the dot product of two packed <4 x i8> vectors.
- * Returns an i32 sum.
- */
+static void
+fsa_build_extract_4x8(struct fsa_llvm_context *ctx, LLVMValueRef dest[4],
+                      LLVMValueRef src, bool sign)
+{
+   LLVMValueRef sh_8 = LLVMConstInt(ctx->i32, 8, 0);
+   LLVMValueRef sh_16 = LLVMConstInt(ctx->i32, 16, 0);
+   LLVMValueRef sh_24 = LLVMConstInt(ctx->i32, 24, 0);
+   dest[0] = LLVMBuildTrunc(ctx->builder, src, ctx->i8, "");
+   dest[1] = LLVMBuildLShr(ctx->builder, src, sh_8, "");
+   dest[2] = LLVMBuildLShr(ctx->builder, src, sh_16, "");
+   dest[3] = LLVMBuildLShr(ctx->builder, src, sh_24, "");
+   for (int i = 0; i < 4; i++) {
+      dest[i] = LLVMBuildTrunc(ctx->builder, dest[i], ctx->i8, "");
+      if (sign) {
+         dest[i] = LLVMBuildSExt(ctx->builder, dest[i], ctx->i32, "");
+      } else {
+         dest[i] = LLVMBuildZExt(ctx->builder, dest[i], ctx->i32, "");
+      }
+   }
+}
+
 static LLVMValueRef
 fsa_build_sdot_4x8_common(struct fsa_llvm_context *ctx, LLVMValueRef src0,
                           LLVMValueRef src1)
 {
-   LLVMBuilderRef builder = ctx->builder;
-   LLVMContextRef context = ctx->context;
+   /* Extract 8-bit values */
+   LLVMValueRef src0_4x8[4] = {0};
+   LLVMValueRef src1_4x8[4] = {0};
+   fsa_build_extract_4x8(ctx, src0_4x8, src0, true);
+   fsa_build_extract_4x8(ctx, src1_4x8, src1, true);
 
-   LLVMTypeRef i32 = LLVMInt32TypeInContext(context);
-   LLVMTypeRef v4i8 = LLVMVectorType(LLVMInt8TypeInContext(context), 4);
-   LLVMTypeRef v4i32 = LLVMVectorType(i32, 4);
+   LLVMValueRef dot[4] = {0};
+   for (int i = 0; i < 4; i++) {
+      dot[i] = LLVMBuildMul(ctx->builder, src0_4x8[i], src1_4x8[i], "");
+   }
 
-   /* Bitcast packed i32 inputs to <4 x i8> vectors */
-   LLVMValueRef vec0 = LLVMBuildBitCast(builder, src0, v4i8, "");
-   LLVMValueRef vec1 = LLVMBuildBitCast(builder, src1, v4i8, "");
-
-   /* Sign-extend elements to i32.
-    * Essential for sdot: ensures 0xFF is treated as -1, not 255.
-    */
-   LLVMValueRef sext0 = LLVMBuildSExt(builder, vec0, v4i32, "");
-   LLVMValueRef sext1 = LLVMBuildSExt(builder, vec1, v4i32, "");
-
-   /* Element-wise multiply (<4 x i32>) */
-   LLVMValueRef prod = LLVMBuildMul(builder, sext0, sext1, "");
-
-   /* Horizontal reduction (sum elements)
-    * We extract manually to ensure compatibility with all LLVM versions.
-    */
-   LLVMValueRef e0 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 0, 0), "");
-   LLVMValueRef e1 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 1, 0), "");
-   LLVMValueRef e2 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 2, 0), "");
-   LLVMValueRef e3 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 3, 0), "");
-
-   LLVMValueRef sum01 = LLVMBuildAdd(builder, e0, e1, "");
-   LLVMValueRef sum23 = LLVMBuildAdd(builder, e2, e3, "");
-
-   return LLVMBuildAdd(builder, sum01, sum23, "");
+   LLVMValueRef tmp0 = LLVMBuildAdd(ctx->builder, dot[0], dot[1], "");
+   LLVMValueRef tmp1 = LLVMBuildAdd(ctx->builder, dot[2], dot[3], "");
+   return LLVMBuildAdd(ctx->builder, tmp0, tmp1, "");
 }
 
-/* nir_op_sdot_4x8_iadd */
 LLVMValueRef
 fsa_build_sdot_4x8_iadd(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
-   LLVMValueRef dot = fsa_build_sdot_4x8_common(ctx, args[0], args[1]);
-   /* Standard integer addition with accumulator */
-   return LLVMBuildAdd(ctx->builder, dot, args[2], "");
+   LLVMValueRef res = fsa_build_sdot_4x8_common(ctx, args[0], args[1]);
+   res = LLVMBuildAdd(ctx->builder, res, args[2], "");
+   return res;
 }
 
-/* nir_op_sdot_4x8_iadd_sat */
 LLVMValueRef
 fsa_build_sdot_4x8_iadd_sat(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
-   LLVMValueRef dot = fsa_build_sdot_4x8_common(ctx, args[0], args[1]);
+   LLVMValueRef res = fsa_build_sdot_4x8_common(ctx, args[0], args[1]);
 
    /* Saturating addition using llvm.sadd.sat.i32 intrinsic */
-   LLVMValueRef sat_args[] = {dot, args[2]};
-   LLVMTypeRef i32 = LLVMInt32TypeInContext(ctx->context);
-
-   return fsa_build_intrinsic(ctx, "llvm.sadd.sat.i32", i32, sat_args, 2, 0);
+   LLVMValueRef sat_args[] = {res, args[2]};
+   return fsa_build_intrinsic(ctx, "llvm.sadd.sat.i32", ctx->i32, sat_args, 2,
+                              0);
 }
 
 /* Helper: Calculates the mixed-sign dot product of two packed <4 x i8> vectors.
@@ -1249,230 +1274,142 @@ static LLVMValueRef
 fsa_build_sudot_4x8_common(struct fsa_llvm_context *ctx, LLVMValueRef src0,
                            LLVMValueRef src1)
 {
-   LLVMBuilderRef builder = ctx->builder;
-   LLVMContextRef context = ctx->context;
+   /* Extract 8-bit values */
+   LLVMValueRef src0_4x8[4] = {0};
+   LLVMValueRef src1_4x8[4] = {0};
+   fsa_build_extract_4x8(ctx, src0_4x8, src0, true);
+   fsa_build_extract_4x8(ctx, src1_4x8, src1, false);
 
-   LLVMTypeRef i32 = LLVMInt32TypeInContext(context);
-   LLVMTypeRef v4i8 = LLVMVectorType(LLVMInt8TypeInContext(context), 4);
-   LLVMTypeRef v4i32 = LLVMVectorType(i32, 4);
+   LLVMValueRef dot[4] = {0};
+   for (int i = 0; i < 4; i++) {
+      dot[i] = LLVMBuildMul(ctx->builder, src0_4x8[i], src1_4x8[i], "");
+   }
 
-   /* Bitcast packed i32 inputs to <4 x i8> vectors */
-   LLVMValueRef vec0 = LLVMBuildBitCast(builder, src0, v4i8, "");
-   LLVMValueRef vec1 = LLVMBuildBitCast(builder, src1, v4i8, "");
-
-   /* Extend elements to i32.
-    * SUDOT Specifics:
-    * Src0 is Signed -> Use SExt
-    * Src1 is Unsigned -> Use ZExt
-    */
-   LLVMValueRef ext0 = LLVMBuildSExt(builder, vec0, v4i32, "");
-   LLVMValueRef ext1 = LLVMBuildZExt(builder, vec1, v4i32, "");
-
-   /* Element-wise multiply (<4 x i32>) */
-   LLVMValueRef prod = LLVMBuildMul(builder, ext0, ext1, "");
-
-   /* Horizontal reduction (sum elements) */
-   LLVMValueRef e0 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 0, 0), "");
-   LLVMValueRef e1 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 1, 0), "");
-   LLVMValueRef e2 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 2, 0), "");
-   LLVMValueRef e3 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 3, 0), "");
-
-   LLVMValueRef sum01 = LLVMBuildAdd(builder, e0, e1, "");
-   LLVMValueRef sum23 = LLVMBuildAdd(builder, e2, e3, "");
-
-   return LLVMBuildAdd(builder, sum01, sum23, "");
+   LLVMValueRef tmp0 = LLVMBuildAdd(ctx->builder, dot[0], dot[1], "");
+   LLVMValueRef tmp1 = LLVMBuildAdd(ctx->builder, dot[2], dot[3], "");
+   return LLVMBuildAdd(ctx->builder, tmp0, tmp1, "");
 }
 
-/* nir_op_sudot_4x8_iadd */
 LLVMValueRef
 fsa_build_sudot_4x8_iadd(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
    LLVMValueRef dot = fsa_build_sudot_4x8_common(ctx, args[0], args[1]);
 
-   /* Standard integer addition with accumulator */
    return LLVMBuildAdd(ctx->builder, dot, args[2], "");
 }
 
-/* nir_op_sudot_4x8_iadd_sat */
 LLVMValueRef
 fsa_build_sudot_4x8_iadd_sat(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
    LLVMValueRef dot = fsa_build_sudot_4x8_common(ctx, args[0], args[1]);
 
-   /* Saturating addition using llvm.sadd.sat.i32 intrinsic.
-    * Even though src1 is unsigned, the result of the dot product is signed
-    * (due to src0), so we use signed saturation for the accumulator add.
-    */
    LLVMValueRef sat_args[] = {dot, args[2]};
    LLVMTypeRef i32 = LLVMInt32TypeInContext(ctx->context);
 
    return fsa_build_intrinsic(ctx, "llvm.sadd.sat.i32", i32, sat_args, 2, 0);
 }
 
-/* Helper: Calculates the unsigned dot product of two packed <4 x i8> vectors.
- * Returns an i32 sum.
- */
 static LLVMValueRef
 fsa_build_udot_4x8_common(struct fsa_llvm_context *ctx, LLVMValueRef src0,
                           LLVMValueRef src1)
 {
-   LLVMBuilderRef builder = ctx->builder;
-   LLVMContextRef context = ctx->context;
+   /* Extract 8-bit values */
+   LLVMValueRef src0_4x8[4] = {0};
+   LLVMValueRef src1_4x8[4] = {0};
+   fsa_build_extract_4x8(ctx, src0_4x8, src0, false);
+   fsa_build_extract_4x8(ctx, src1_4x8, src1, false);
 
-   LLVMTypeRef i32 = LLVMInt32TypeInContext(context);
-   LLVMTypeRef v4i8 = LLVMVectorType(LLVMInt8TypeInContext(context), 4);
-   LLVMTypeRef v4i32 = LLVMVectorType(i32, 4);
+   LLVMValueRef dot[4] = {0};
+   for (int i = 0; i < 4; i++) {
+      dot[i] = LLVMBuildMul(ctx->builder, src0_4x8[i], src1_4x8[i], "");
+   }
 
-   /* Bitcast packed i32 inputs to <4 x i8> vectors */
-   LLVMValueRef vec0 = LLVMBuildBitCast(builder, src0, v4i8, "");
-   LLVMValueRef vec1 = LLVMBuildBitCast(builder, src1, v4i8, "");
-
-   /* Zero-extend elements to i32.
-    * Essential for udot: ensures all 8-bit values are positive.
-    */
-   LLVMValueRef zext0 = LLVMBuildZExt(builder, vec0, v4i32, "");
-   LLVMValueRef zext1 = LLVMBuildZExt(builder, vec1, v4i32, "");
-
-   /* Element-wise multiply (<4 x i32>) */
-   LLVMValueRef prod = LLVMBuildMul(builder, zext0, zext1, "");
-
-   /* Horizontal reduction (sum elements) */
-   LLVMValueRef e0 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 0, 0), "");
-   LLVMValueRef e1 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 1, 0), "");
-   LLVMValueRef e2 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 2, 0), "");
-   LLVMValueRef e3 =
-      LLVMBuildExtractElement(builder, prod, LLVMConstInt(i32, 3, 0), "");
-
-   LLVMValueRef sum01 = LLVMBuildAdd(builder, e0, e1, "");
-   LLVMValueRef sum23 = LLVMBuildAdd(builder, e2, e3, "");
-
-   return LLVMBuildAdd(builder, sum01, sum23, "");
+   LLVMValueRef tmp0 = LLVMBuildAdd(ctx->builder, dot[0], dot[1], "");
+   LLVMValueRef tmp1 = LLVMBuildAdd(ctx->builder, dot[2], dot[3], "");
+   return LLVMBuildAdd(ctx->builder, tmp0, tmp1, "");
 }
 
-/* nir_op_udot_4x8_uadd */
 LLVMValueRef
 fsa_build_udot_4x8_uadd(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
    LLVMValueRef dot = fsa_build_udot_4x8_common(ctx, args[0], args[1]);
-
-   /* Standard integer addition with accumulator */
    return LLVMBuildAdd(ctx->builder, dot, args[2], "");
 }
 
-/* nir_op_udot_4x8_uadd_sat */
 LLVMValueRef
 fsa_build_udot_4x8_uadd_sat(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
    LLVMValueRef dot = fsa_build_udot_4x8_common(ctx, args[0], args[1]);
-
-   /* Saturating addition using llvm.uadd.sat.i32 intrinsic.
-    * We use Unsigned saturation here because the operation is defined as
-    * unsigned.
-    */
    LLVMValueRef sat_args[] = {dot, args[2]};
    LLVMTypeRef i32 = LLVMInt32TypeInContext(ctx->context);
 
    return fsa_build_intrinsic(ctx, "llvm.uadd.sat.i32", i32, sat_args, 2, 0);
 }
 
-/*
- * Helper: Unpacks two 32-bit values into 2x16-bit vectors, extends them,
- * and performs the dot product (multiplication + addition).
- * * Logic:
- * src0 = [a1, a0] (16-bit elements packed in i32)
- * src1 = [b1, b0] (16-bit elements packed in i32)
- * result = (ext(a0) * ext(b0)) + (ext(a1) * ext(b1))
- */
+static void
+fsa_build_extract_2x16(struct fsa_llvm_context *ctx, LLVMValueRef dest[2],
+                       LLVMValueRef src, bool sign)
+{
+   LLVMValueRef sh_16 = LLVMConstInt(ctx->i32, 16, 0);
+   dest[0] = LLVMBuildTrunc(ctx->builder, src, ctx->i16, "");
+   dest[1] = LLVMBuildLShr(ctx->builder, src, sh_16, "");
+   for (int i = 0; i < 2; i++) {
+      dest[i] = LLVMBuildTrunc(ctx->builder, dest[i], ctx->i16, "");
+      if (sign) {
+         dest[i] = LLVMBuildSExt(ctx->builder, dest[i], ctx->i32, "");
+      } else {
+         dest[i] = LLVMBuildZExt(ctx->builder, dest[i], ctx->i32, "");
+      }
+   }
+}
+
 static LLVMValueRef
 fsa_build_dot_2x16_common(struct fsa_llvm_context *ctx, LLVMValueRef src0,
                           LLVMValueRef src1, int is_signed)
 {
-   LLVMBuilderRef builder = ctx->builder;
-   LLVMContextRef context = ctx->context;
+   /* Extract 16-bit values */
+   LLVMValueRef src0_2x16[2] = {0};
+   LLVMValueRef src1_2x16[2] = {0};
+   fsa_build_extract_2x16(ctx, src0_2x16, src0, is_signed);
+   fsa_build_extract_2x16(ctx, src1_2x16, src1, is_signed);
 
-   LLVMTypeRef i32 = LLVMInt32TypeInContext(context);
-   LLVMTypeRef i16 = LLVMInt16TypeInContext(context);
-   LLVMTypeRef v2i16 = LLVMVectorType(i16, 2);
+   LLVMValueRef dot[2] = {0};
+   for (int i = 0; i < 2; i++) {
+      dot[i] = LLVMBuildMul(ctx->builder, src0_2x16[i], src1_2x16[i], "");
+   }
 
-   /* Bitcast standard i32 inputs to <2 x i16> for easy extraction */
-   LLVMValueRef vec0 = LLVMBuildBitCast(builder, src0, v2i16, "");
-   LLVMValueRef vec1 = LLVMBuildBitCast(builder, src1, v2i16, "");
-
-   /* Indices for extraction */
-   LLVMValueRef idx0 = LLVMConstInt(i32, 0, 0);
-   LLVMValueRef idx1 = LLVMConstInt(i32, 1, 0);
-
-   /* Extract elements */
-   LLVMValueRef a0 = LLVMBuildExtractElement(builder, vec0, idx0, "");
-   LLVMValueRef a1 = LLVMBuildExtractElement(builder, vec0, idx1, "");
-   LLVMValueRef b0 = LLVMBuildExtractElement(builder, vec1, idx0, "");
-   LLVMValueRef b1 = LLVMBuildExtractElement(builder, vec1, idx1, "");
-
-   /* Extend to 32-bit (Sign Extend if sdot, Zero Extend if udot) */
-   LLVMOpcode ext_op = is_signed ? LLVMSExt : LLVMZExt;
-   LLVMValueRef a0_32 = LLVMBuildCast(builder, ext_op, a0, i32, "");
-   LLVMValueRef a1_32 = LLVMBuildCast(builder, ext_op, a1, i32, "");
-   LLVMValueRef b0_32 = LLVMBuildCast(builder, ext_op, b0, i32, "");
-   LLVMValueRef b1_32 = LLVMBuildCast(builder, ext_op, b1, i32, "");
-
-   /* Multiply components */
-   LLVMValueRef mul0 = LLVMBuildMul(builder, a0_32, b0_32, "");
-   LLVMValueRef mul1 = LLVMBuildMul(builder, a1_32, b1_32, "");
-
-   /* Add products (the dot part) */
-   return LLVMBuildAdd(builder, mul0, mul1, "");
+   return LLVMBuildAdd(ctx->builder, dot[0], dot[1], "");
 }
 
-/* nir_op_sdot_2x16_iadd */
 LLVMValueRef
 fsa_build_sdot_2x16_iadd(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
-   LLVMValueRef dot =
-      fsa_build_dot_2x16_common(ctx, args[0], args[1], 1 /* signed */);
-
-   /* Simple integer addition with accumulator */
+   LLVMValueRef dot = fsa_build_dot_2x16_common(ctx, args[0], args[1], 1);
    return LLVMBuildAdd(ctx->builder, dot, args[2], "");
 }
 
-/* nir_op_udot_2x16_uadd */
 LLVMValueRef
 fsa_build_udot_2x16_uadd(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
-   LLVMValueRef dot =
-      fsa_build_dot_2x16_common(ctx, args[0], args[1], 0 /* unsigned */);
-
-   /* Simple integer addition with accumulator */
+   LLVMValueRef dot = fsa_build_dot_2x16_common(ctx, args[0], args[1], 0);
    return LLVMBuildAdd(ctx->builder, dot, args[2], "");
 }
 
-/* nir_op_sdot_2x16_iadd_sat */
 LLVMValueRef
 fsa_build_sdot_2x16_iadd_sat(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
-   LLVMValueRef dot =
-      fsa_build_dot_2x16_common(ctx, args[0], args[1], 1 /* signed */);
+   LLVMValueRef dot = fsa_build_dot_2x16_common(ctx, args[0], args[1], 1);
 
    /* Saturating addition using llvm.sadd.sat.i32 intrinsic */
    LLVMValueRef sat_args[] = {dot, args[2]};
    LLVMTypeRef i32 = LLVMInt32TypeInContext(ctx->context);
-
    return fsa_build_intrinsic(ctx, "llvm.sadd.sat.i32", i32, sat_args, 2, 0);
 }
 
-/* nir_op_udot_2x16_uadd_sat */
 LLVMValueRef
 fsa_build_udot_2x16_uadd_sat(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
-   LLVMValueRef dot =
-      fsa_build_dot_2x16_common(ctx, args[0], args[1], 0 /* unsigned */);
-
+   LLVMValueRef dot = fsa_build_dot_2x16_common(ctx, args[0], args[1], 0);
    /* Saturating addition using llvm.uadd.sat.i32 intrinsic */
    LLVMValueRef sat_args[] = {dot, args[2]};
    LLVMTypeRef i32 = LLVMInt32TypeInContext(ctx->context);
@@ -1480,80 +1417,38 @@ fsa_build_udot_2x16_uadd_sat(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
    return fsa_build_intrinsic(ctx, "llvm.uadd.sat.i32", i32, sat_args, 2, 0);
 }
 
-/* * Helper: Unpacks 4x8 inputs, computes masked absolute differences.
- * logic: if (mask[i] != 0) accum += |src[i] - mask[i]|
- * Note: AMD's msad.u8 signature is typically (src, ref/mask, accum).
- * The 'ref' argument acts as both the subtrahend and the mask.
- */
 static LLVMValueRef
-fsa_build_msad_4x8_common(struct fsa_llvm_context *ctx, LLVMValueRef src_packed,
-                          LLVMValueRef mask_packed)
+fsa_build_msad_4x8_common(struct fsa_llvm_context *ctx, LLVMValueRef src0,
+                          LLVMValueRef src1)
 {
-   LLVMBuilderRef builder = ctx->builder;
-   LLVMContextRef context = ctx->context;
-
-   LLVMTypeRef i8 = LLVMInt8TypeInContext(context);
-   LLVMTypeRef i32 = LLVMInt32TypeInContext(context);
-   LLVMTypeRef v4i8 = LLVMVectorType(i8, 4);
-
-   /* Bitcast inputs to <4 x i8> */
-   LLVMValueRef src_vec = LLVMBuildBitCast(builder, src_packed, v4i8, "");
-   LLVMValueRef mask_vec = LLVMBuildBitCast(builder, mask_packed, v4i8, "");
-
-   /* Initialize sum to 0 */
-   LLVMValueRef sum = LLVMConstInt(i32, 0, 0);
-
-   /* Loop over 4 bytes manually (unrolled) */
-   for (int i = 0; i < 4; ++i) {
-      LLVMValueRef idx = LLVMConstInt(i32, i, 0);
-
-      LLVMValueRef s = LLVMBuildExtractElement(builder, src_vec, idx, "");
-      LLVMValueRef m = LLVMBuildExtractElement(builder, mask_vec, idx, "");
-
-      /* Extend to i32 for arithmetic */
-      LLVMValueRef s_32 = LLVMBuildZExt(builder, s, i32, "");
-      LLVMValueRef m_32 = LLVMBuildZExt(builder, m, i32, "");
-
-      /* abs_diff = (diff < 0) ? -diff : diff */
-      /* Since we operate in i32 zext, simple sub might wrap.
-       * Standard ABS logic: select(diff >= 0, diff, -diff) relies on signed
-       * interpretation of result OR simpler for u8 inputs: max(s, m) - min(s, m)
-       */
-      LLVMValueRef cmp = LLVMBuildICmp(builder, LLVMIntUGE, s_32, m_32, "");
-      LLVMValueRef max = LLVMBuildSelect(builder, cmp, s_32, m_32, "");
-      LLVMValueRef min = LLVMBuildSelect(builder, cmp, m_32, s_32, "");
-      LLVMValueRef abs_diff = LLVMBuildSub(builder, max, min, "");
-
-      /* Masking Logic: AMD MSAD only adds difference if mask byte != 0 */
-      LLVMValueRef is_nonzero =
-         LLVMBuildICmp(builder, LLVMIntNE, m_32, LLVMConstInt(i32, 0, 0), "");
-      LLVMValueRef term = LLVMBuildSelect(builder, is_nonzero, abs_diff,
-                                          LLVMConstInt(i32, 0, 0), "");
-
-      sum = LLVMBuildAdd(builder, sum, term, "");
+   LLVMValueRef src0_4x8[4], mask[4], absDiff[4];
+   fsa_build_extract_4x8(ctx, src0_4x8, src0, false);
+   fsa_build_extract_4x8(ctx, mask, src1, false);
+   for (int i = 0; i < 4; i++) {
+      absDiff[i] = LLVMBuildSub(ctx->builder, src0_4x8[i], mask[i], "");
+      LLVMValueRef absArgs[2] = {absDiff[i], ctx->i1false};
+      absDiff[i] =
+         fsa_build_intrinsic(ctx, "llvm.abs.i32", ctx->i32, absArgs, 2, 0);
+      absDiff[i] = LLVMBuildZExt(ctx->builder, absDiff[i], ctx->i32, "");
    }
-
-   return sum;
+   LLVMValueRef sum01 = LLVMBuildAdd(ctx->builder, absDiff[0], absDiff[1], "");
+   LLVMValueRef sum23 = LLVMBuildAdd(ctx->builder, absDiff[2], absDiff[3], "");
+   return LLVMBuildAdd(ctx->builder, sum01, sum23, "");
 }
 
-/* nir_op_msad_4x8 */
 LLVMValueRef
 fsa_build_msad_4x8(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {
    /* args[0] = src (packed u32)
-    * args[1] = mask/ref (packed u32)
+    * args[1] = mask (packed u32)
     * args[2] = accum (u32)
     * Note: NIR order matches AMD: src, mask, accum
     */
 
-   /* Calculate the MSAD of the 4 bytes */
    LLVMValueRef msad_val = fsa_build_msad_4x8_common(ctx, args[0], args[1]);
-
-   /* Add the accumulator */
    return LLVMBuildAdd(ctx->builder, msad_val, args[2], "");
 }
 
-/* nir_op_mqsad_4x8 */
 LLVMValueRef
 fsa_build_mqsad_4x8(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
 {

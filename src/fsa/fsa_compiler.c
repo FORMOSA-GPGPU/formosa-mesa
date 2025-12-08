@@ -4,7 +4,9 @@
 #include "main/shader_types.h"
 #include <llvm-c/Analysis.h>
 #include "fsa_llvm_build.h"
+#include "fsa_llvm_verify.h"
 #include "fsa_nir_to_llvm.h"
+#include "fsa_util.h"
 
 /** @file fsa_compiler.cc
  *
@@ -67,21 +69,7 @@ fsa_print_linked_prog_nir(struct gl_shader_program *whole_prog,
    fsa_print_nir_info(frag_prog->nir);
 }
 
-static int
-llvm_verify_and_report(LLVMModuleRef module)
-{
-   char *error = NULL;
-
-   if (LLVMVerifyModule(module, LLVMReturnStatusAction, &error)) {
-      fprintf(stderr, "LLVM Module verification failed:\n%s\n", error);
-      LLVMDisposeMessage(error);
-      LLVMDumpModule(module);
-      return -1;
-   }
-   return 0;
-}
-
-int
+LLVMModuleRef
 fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp)
 {
    if (fp)
@@ -89,22 +77,20 @@ fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp)
    struct fsa_llvm_context tmp;
    fsa_llvm_context_init(&tmp);
    if (!fsa_nir_translate(&tmp, shader))
-      return -1;
+      return NULL;
    /* Insert a temp ret to pass verification */
    LLVMBuildRetVoid(tmp.builder);
 
    /* Dump */
-   if (llvm_verify_and_report(tmp.module)) {
-      return -1;
+   if (fsa_llvm_verify_module(tmp.module)) {
+      return NULL;
    }
-   if (!fp)
-      return 0;
-   char *ir_str = LLVMPrintModuleToString(tmp.module);
-   fprintf(fp,
-           "###### DUMPING LLVM IR ######\n%s\n###########################\n",
-           ir_str);
-   LLVMDisposeMessage(ir_str);
-   return 0;
+   fsa_print_llvm_module(tmp.module, fp);
+   if (fsa_llvm_verify_optimize_module(tmp.module)) {
+      return NULL;
+   }
+   fsa_print_llvm_module(tmp.module, fp);
+   return tmp.module;
 }
 
 void

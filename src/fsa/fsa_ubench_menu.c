@@ -40,15 +40,16 @@ fsa_select_bench_interactive()
    const int SCROLL_OFF = 3;
 
    int choice = -1;
+   bool running = true;
    int ch;
 
    initscr();
-   cbreak();
+   raw();
    noecho();
    curs_set(0);
    keypad(stdscr, TRUE);
 
-   while (choice == -1) {
+   while (running) {
       filtered_count = 0;
       for (int i = 0; i < total_count; i++) {
          if (is_fuzzy_match(query, fsa_nir_benchlist[i].name)) {
@@ -127,6 +128,14 @@ fsa_select_bench_interactive()
       ch = getch();
 
       switch (ch) {
+      case 3: // Ctrl-C
+         choice = -1;
+         running = false;
+         break;
+      case 27: // ESC key (can be slow to register in some terms)
+         choice = -1;
+         running = false;
+         break;
       case KEY_UP:
          if (highlight > 0)
             highlight--;
@@ -138,6 +147,7 @@ fsa_select_bench_interactive()
       case 10: // Enter
          if (filtered_count > 0) {
             choice = filtered_indices[highlight];
+            running = false;
          }
          break;
       case KEY_BACKSPACE:

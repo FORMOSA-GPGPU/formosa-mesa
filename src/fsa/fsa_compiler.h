@@ -4,6 +4,7 @@
 #include "compiler/glsl/standalone.h"
 #include "compiler/nir/nir.h"
 #include "main/shader_types.h"
+#include <llvm-c/Core.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,7 +26,7 @@ void fsa_compiler_cleanup(struct gl_shader_program *prog);
 void fsa_compiler_operation(struct gl_shader_program *whole_prog,
                             const struct fsa_options *options);
 
-int fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp);
+LLVMModuleRef fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp);
 
 #ifdef __cplusplus
 }
