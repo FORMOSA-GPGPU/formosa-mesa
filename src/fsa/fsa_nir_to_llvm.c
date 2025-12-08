@@ -305,6 +305,103 @@ emit_uint_carry(struct fsa_llvm_context *ctx, const char *intrin,
    return res;
 }
 
+static LLVMValueRef
+emit_f2f16(struct fsa_llvm_context *ctx, LLVMValueRef src0)
+{
+   LLVMValueRef result;
+   LLVMValueRef cond = NULL;
+
+   src0 = fsa_to_float(ctx, src0);
+   result = LLVMBuildFPTrunc(ctx->builder, src0, ctx->f16, "");
+
+   /* need to convert back up to f32 */
+   result = LLVMBuildFPExt(ctx->builder, result, ctx->f32, "");
+
+   /* 0x38800000 is smallest half float value (2^-14) in 32-bit float,
+    * so compare the result and flush to 0 if it's smaller.
+    */
+   LLVMValueRef temp, cond2;
+   temp = emit_intrin_1f_param(ctx, "llvm.fabs", ctx->f32, result);
+   cond = LLVMBuildFCmp(
+      ctx->builder, LLVMRealOGT,
+      LLVMBuildBitCast(ctx->builder, LLVMConstInt(ctx->i32, 0x38800000, false),
+                       ctx->f32, ""),
+      temp, "");
+   cond2 = LLVMBuildFCmp(ctx->builder, LLVMRealONE, temp, ctx->f32_0, "");
+   cond = LLVMBuildAnd(ctx->builder, cond, cond2, "");
+   result = LLVMBuildSelect(ctx->builder, cond, ctx->f32_0, result, "");
+   return result;
+}
+
+static LLVMValueRef
+emit_umul_high(struct fsa_llvm_context *ctx, LLVMValueRef src0,
+               LLVMValueRef src1)
+{
+   LLVMValueRef dst64, result;
+
+   src0 = LLVMBuildZExt(ctx->builder, src0, ctx->i64, "");
+   src1 = LLVMBuildZExt(ctx->builder, src1, ctx->i64, "");
+
+   dst64 = LLVMBuildMul(ctx->builder, src0, src1, "");
+   dst64 =
+      LLVMBuildLShr(ctx->builder, dst64, LLVMConstInt(ctx->i64, 32, false), "");
+   result = LLVMBuildTrunc(ctx->builder, dst64, ctx->i32, "");
+   return result;
+}
+
+static LLVMValueRef
+emit_imul_high(struct fsa_llvm_context *ctx, LLVMValueRef src0,
+               LLVMValueRef src1)
+{
+   LLVMValueRef dst64, result;
+   src0 = LLVMBuildSExt(ctx->builder, src0, ctx->i64, "");
+   src1 = LLVMBuildSExt(ctx->builder, src1, ctx->i64, "");
+
+   dst64 = LLVMBuildMul(ctx->builder, src0, src1, "");
+   dst64 =
+      LLVMBuildAShr(ctx->builder, dst64, LLVMConstInt(ctx->i64, 32, false), "");
+   result = LLVMBuildTrunc(ctx->builder, dst64, ctx->i32, "");
+   return result;
+}
+
+static void
+nir_op_error(const nir_instr *instr, const char *msg)
+{
+   fprintf(stderr, "%s\n", msg);
+   nir_print_instr(instr, stderr);
+   fprintf(stderr, "\n");
+}
+
+static LLVMValueRef
+emit_pack_2x16(struct fsa_llvm_context *ctx, LLVMValueRef src0,
+               LLVMValueRef (*pack)(struct fsa_llvm_context *ctx,
+                                    LLVMValueRef args[2]))
+{
+   LLVMValueRef comp[2];
+
+   src0 = fsa_to_float(ctx, src0);
+   comp[0] = LLVMBuildExtractElement(ctx->builder, src0, ctx->i32_0, "");
+   comp[1] = LLVMBuildExtractElement(ctx->builder, src0, ctx->i32_1, "");
+
+   return LLVMBuildBitCast(ctx->builder, pack(ctx, comp), ctx->i32, "");
+}
+
+static LLVMValueRef
+emit_unpack_half_2x16(struct fsa_llvm_context *ctx, LLVMValueRef src0)
+{
+   LLVMValueRef const16 = LLVMConstInt(ctx->i32, 16, false);
+   LLVMValueRef temps[2], val;
+   int i;
+
+   for (i = 0; i < 2; i++) {
+      val = i == 1 ? LLVMBuildLShr(ctx->builder, src0, const16, "") : src0;
+      val = LLVMBuildTrunc(ctx->builder, val, ctx->i16, "");
+      val = LLVMBuildBitCast(ctx->builder, val, ctx->f16, "");
+      temps[i] = LLVMBuildFPExt(ctx->builder, val, ctx->f32, "");
+   }
+   return fsa_build_gather_values(ctx, temps, 2);
+}
+
 static bool
 visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
 {
@@ -728,6 +825,211 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
    case nir_op_b2b32: /* before stores */
       result = LLVMBuildZExt(ctx->fsa.builder, src[0], ctx->fsa.i32, "");
       break;
+   case nir_op_fquantize2f16:
+      result = emit_f2f16(&ctx->fsa, src[0]);
+      break;
+   case nir_op_umul_high:
+      result = emit_umul_high(&ctx->fsa, src[0], src[1]);
+      break;
+   case nir_op_imul_high:
+      result = emit_imul_high(&ctx->fsa, src[0], src[1]);
+      break;
+   case nir_op_pack_half_2x16_rtz_split:
+   case nir_op_pack_half_2x16_split:
+      nir_op_error(&instr->instr, "GLSL packHalf2x16 only supported in 4.0 up");
+      break;
+   case nir_op_pack_snorm_2x16:
+   case nir_op_pack_unorm_2x16: {
+      unsigned bit_size = instr->src[0].src.ssa->bit_size;
+      /* Only support 16 and 32bit. */
+      assert(bit_size == 16 || bit_size == 32);
+
+      LLVMValueRef data = src[0];
+      LLVMValueRef (*pack)(struct fsa_llvm_context *ctx, LLVMValueRef args[2]);
+      if (bit_size == 32) {
+         pack = instr->op == nir_op_pack_snorm_2x16 ? fsa_build_cvt_pknorm_i16
+                                                    : fsa_build_cvt_pknorm_u16;
+      } else {
+         pack = instr->op == nir_op_pack_snorm_2x16
+                   ? fsa_build_cvt_pknorm_i16_f16
+                   : fsa_build_cvt_pknorm_u16_f16;
+      }
+      result = emit_pack_2x16(&ctx->fsa, data, pack);
+      break;
+   }
+   case nir_op_pack_uint_2x16: {
+      LLVMValueRef comp[2];
+      comp[0] =
+         LLVMBuildExtractElement(ctx->fsa.builder, src[0], ctx->fsa.i32_0, "");
+      comp[1] =
+         LLVMBuildExtractElement(ctx->fsa.builder, src[0], ctx->fsa.i32_1, "");
+
+      result = fsa_build_pack_uint_2x16(&ctx->fsa, comp);
+      break;
+   }
+   case nir_op_pack_sint_2x16: {
+      LLVMValueRef comp[2];
+      comp[0] =
+         LLVMBuildExtractElement(ctx->fsa.builder, src[0], ctx->fsa.i32_0, "");
+      comp[1] =
+         LLVMBuildExtractElement(ctx->fsa.builder, src[0], ctx->fsa.i32_1, "");
+
+      result = fsa_build_pack_sint_2x16(&ctx->fsa, comp);
+      break;
+   }
+   case nir_op_unpack_half_2x16_split_x: {
+      assert(fsa_get_llvm_num_components(src[0]) == 1);
+      LLVMValueRef tmp = emit_unpack_half_2x16(&ctx->fsa, src[0]);
+      result =
+         LLVMBuildExtractElement(ctx->fsa.builder, tmp, ctx->fsa.i32_0, "");
+      break;
+   }
+   case nir_op_unpack_half_2x16_split_y: {
+      assert(fsa_get_llvm_num_components(src[0]) == 1);
+      LLVMValueRef tmp = emit_unpack_half_2x16(&ctx->fsa, src[0]);
+      result =
+         LLVMBuildExtractElement(ctx->fsa.builder, tmp, ctx->fsa.i32_1, "");
+      break;
+   }
+   case nir_op_unpack_64_4x16: {
+      result = LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v4i16, "");
+      break;
+   }
+
+   case nir_op_unpack_64_2x32: {
+      result = LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v2i32, "");
+      break;
+   }
+   case nir_op_unpack_64_2x32_split_x: {
+      assert(fsa_get_llvm_num_components(src[0]) == 1);
+      LLVMValueRef tmp =
+         LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v2i32, "");
+      result =
+         LLVMBuildExtractElement(ctx->fsa.builder, tmp, ctx->fsa.i32_0, "");
+      break;
+   }
+   case nir_op_unpack_64_2x32_split_y: {
+      assert(fsa_get_llvm_num_components(src[0]) == 1);
+      LLVMValueRef tmp =
+         LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v2i32, "");
+      result =
+         LLVMBuildExtractElement(ctx->fsa.builder, tmp, ctx->fsa.i32_1, "");
+      break;
+   }
+
+   case nir_op_pack_64_2x32_split: {
+      LLVMValueRef tmp = fsa_build_gather_values(&ctx->fsa, src, 2);
+      result = LLVMBuildBitCast(ctx->fsa.builder, tmp, ctx->fsa.i64, "");
+      break;
+   }
+
+   case nir_op_pack_32_4x8: {
+      result = LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.i32, "");
+      break;
+   }
+   case nir_op_pack_32_2x16_split: {
+      LLVMValueRef tmp = fsa_build_gather_values(&ctx->fsa, src, 2);
+      result = LLVMBuildBitCast(ctx->fsa.builder, tmp, ctx->fsa.i32, "");
+      break;
+   }
+
+   case nir_op_unpack_32_4x8:
+      result = LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v4i8, "");
+      break;
+   case nir_op_unpack_32_2x16: {
+      result = LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v2i16, "");
+      break;
+   }
+   case nir_op_unpack_32_2x16_split_x: {
+      LLVMValueRef tmp =
+         LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v2i16, "");
+      result =
+         LLVMBuildExtractElement(ctx->fsa.builder, tmp, ctx->fsa.i32_0, "");
+      break;
+   }
+   case nir_op_unpack_32_2x16_split_y: {
+      LLVMValueRef tmp =
+         LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.v2i16, "");
+      result =
+         LLVMBuildExtractElement(ctx->fsa.builder, tmp, ctx->fsa.i32_1, "");
+      break;
+   }
+   case nir_op_extract_u8:
+   case nir_op_extract_i8:
+   case nir_op_extract_u16:
+   case nir_op_extract_i16: {
+      bool is_signed =
+         instr->op == nir_op_extract_i16 || instr->op == nir_op_extract_i8;
+      unsigned size =
+         instr->op == nir_op_extract_u8 || instr->op == nir_op_extract_i8 ? 8
+                                                                          : 16;
+      LLVMValueRef offset = LLVMConstInt(
+         LLVMTypeOf(src[0]), nir_src_as_uint(instr->src[1].src) * size, false);
+      result = LLVMBuildLShr(ctx->fsa.builder, src[0], offset, "");
+      result = LLVMBuildTrunc(ctx->fsa.builder, result,
+                              LLVMIntTypeInContext(ctx->fsa.context, size), "");
+      if (is_signed)
+         result =
+            LLVMBuildSExt(ctx->fsa.builder, result, LLVMTypeOf(src[0]), "");
+      else
+         result =
+            LLVMBuildZExt(ctx->fsa.builder, result, LLVMTypeOf(src[0]), "");
+      break;
+   }
+
+   case nir_op_insert_u8:
+   case nir_op_insert_u16: {
+      unsigned size = instr->op == nir_op_insert_u8 ? 8 : 16;
+      LLVMValueRef offset = LLVMConstInt(
+         LLVMTypeOf(src[0]), nir_src_as_uint(instr->src[1].src) * size, false);
+      LLVMValueRef mask =
+         LLVMConstInt(LLVMTypeOf(src[0]), u_bit_consecutive(0, size), false);
+      result = LLVMBuildShl(ctx->fsa.builder,
+                            LLVMBuildAnd(ctx->fsa.builder, src[0], mask, ""),
+                            offset, "");
+      break;
+   }
+   case nir_op_sdot_4x8_iadd:
+      result = fsa_build_sdot_4x8_iadd(&ctx->fsa, src);
+      break;
+   case nir_op_sdot_4x8_iadd_sat:
+      result = fsa_build_sdot_4x8_iadd_sat(&ctx->fsa, src);
+      break;
+   case nir_op_sudot_4x8_iadd:
+      result = fsa_build_sudot_4x8_iadd(&ctx->fsa, src);
+      break;
+   case nir_op_sudot_4x8_iadd_sat:
+      result = fsa_build_sudot_4x8_iadd_sat(&ctx->fsa, src);
+      break;
+   case nir_op_udot_4x8_uadd:
+      result = fsa_build_udot_4x8_uadd(&ctx->fsa, src);
+      break;
+   case nir_op_udot_4x8_uadd_sat:
+      result = fsa_build_udot_4x8_uadd_sat(&ctx->fsa, src);
+      break;
+   case nir_op_sdot_2x16_iadd:
+      result = fsa_build_sdot_2x16_iadd(&ctx->fsa, src);
+      break;
+   case nir_op_udot_2x16_uadd:
+      result = fsa_build_udot_2x16_uadd(&ctx->fsa, src);
+      break;
+   case nir_op_sdot_2x16_iadd_sat:
+      result = fsa_build_sdot_2x16_iadd_sat(&ctx->fsa, src);
+      break;
+   case nir_op_udot_2x16_uadd_sat:
+      result = fsa_build_udot_2x16_uadd_sat(&ctx->fsa, src);
+      break;
+   case nir_op_msad_4x8:
+      result = fsa_build_msad_4x8(&ctx->fsa, src);
+      break;
+   case nir_op_mqsad_4x8:
+      result = fsa_build_mqsad_4x8(&ctx->fsa, src);
+      break;
+   case nir_op_shfr:
+      result =
+         fsa_build_intrinsic(&ctx->fsa, "llvm.fshr.i32", ctx->fsa.i32,
+                             (LLVMValueRef[]){src[0], src[1], src[2]}, 3, 0);
+      break;
    case nir_op_vec2:
    case nir_op_vec3:
    case nir_op_vec4:
@@ -743,6 +1045,15 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       return false;
    }
    if (result) {
+      LLVMTypeKind type_kind = LLVMGetTypeKind(LLVMTypeOf(result));
+      bool is_float = type_kind == LLVMHalfTypeKind ||
+                      type_kind == LLVMFloatTypeKind ||
+                      type_kind == LLVMDoubleTypeKind;
+      if (is_float)
+         result =
+            fsa_build_canonicalize(&ctx->fsa, result, instr->def.bit_size);
+
+      result = fsa_to_integer_or_pointer(&ctx->fsa, result);
       ctx->ssa_defs[instr->def.index] = result;
    }
    return true;

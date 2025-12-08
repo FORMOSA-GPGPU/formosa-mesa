@@ -31,6 +31,12 @@ struct fsa_llvm_context {
    LLVMTypeRef f16;
    LLVMTypeRef f32;
    LLVMTypeRef f64;
+   LLVMTypeRef v2i8;
+   LLVMTypeRef v3i8;
+   LLVMTypeRef v4i8;
+   LLVMTypeRef v2i16;
+   LLVMTypeRef v3i16;
+   LLVMTypeRef v4i16;
    LLVMTypeRef v2i32;
    LLVMTypeRef v3i32;
    LLVMTypeRef v4i32;
@@ -145,5 +151,41 @@ LLVMValueRef ac_build_umsb(struct fsa_llvm_context *ctx, LLVMValueRef arg,
                            LLVMTypeRef dst_type, bool rev);
 LLVMValueRef fsa_build_imsb(struct fsa_llvm_context *ctx, LLVMValueRef arg,
                             LLVMTypeRef dst_type, bool rev);
+LLVMValueRef fsa_build_cvt_pknorm_i16(struct fsa_llvm_context *ctx,
+                                      LLVMValueRef args[2]);
+LLVMValueRef fsa_build_cvt_pknorm_u16(struct fsa_llvm_context *ctx,
+                                      LLVMValueRef args[2]);
+LLVMValueRef fsa_build_cvt_pknorm_i16_f16(struct fsa_llvm_context *ctx,
+                                          LLVMValueRef args[2]);
+LLVMValueRef fsa_build_cvt_pknorm_u16_f16(struct fsa_llvm_context *ctx,
+                                          LLVMValueRef args[2]);
+LLVMValueRef fsa_build_pack_uint_2x16(struct fsa_llvm_context *ctx,
+                                      LLVMValueRef args[2]);
+LLVMValueRef fsa_build_pack_sint_2x16(struct fsa_llvm_context *ctx,
+                                      LLVMValueRef args[2]);
+LLVMValueRef fsa_build_sdot_4x8_iadd(struct fsa_llvm_context *ctx,
+                                     LLVMValueRef args[3]);
+LLVMValueRef fsa_build_sdot_4x8_iadd_sat(struct fsa_llvm_context *ctx,
+                                         LLVMValueRef args[3]);
+LLVMValueRef fsa_build_sudot_4x8_iadd(struct fsa_llvm_context *ctx,
+                                      LLVMValueRef args[3]);
+LLVMValueRef fsa_build_sudot_4x8_iadd_sat(struct fsa_llvm_context *ctx,
+                                          LLVMValueRef args[3]);
+LLVMValueRef fsa_build_udot_4x8_uadd(struct fsa_llvm_context *ctx,
+                                     LLVMValueRef args[3]);
+LLVMValueRef fsa_build_udot_4x8_uadd_sat(struct fsa_llvm_context *ctx,
+                                         LLVMValueRef args[3]);
+LLVMValueRef fsa_build_sdot_2x16_iadd(struct fsa_llvm_context *ctx,
+                                      LLVMValueRef args[3]);
+LLVMValueRef fsa_build_udot_2x16_uadd(struct fsa_llvm_context *ctx,
+                                      LLVMValueRef args[3]);
+LLVMValueRef fsa_build_sdot_2x16_iadd_sat(struct fsa_llvm_context *ctx,
+                                          LLVMValueRef args[3]);
+LLVMValueRef fsa_build_udot_2x16_uadd_sat(struct fsa_llvm_context *ctx,
+                                          LLVMValueRef args[3]);
+LLVMValueRef fsa_build_msad_4x8(struct fsa_llvm_context *ctx,
+                                LLVMValueRef args[3]);
+LLVMValueRef fsa_build_mqsad_4x8(struct fsa_llvm_context *ctx,
+                                 LLVMValueRef args[3]);
 
 #endif

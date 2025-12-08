@@ -139,6 +139,19 @@ DEFINE_TERNARY_GROUP(ffmaz, nir_type_float32)
 DEFINE_TERNARY_GROUP(bitfield_select, nir_type_uint32)
 DEFINE_TERNARY_GROUP(ubfe, nir_type_uint32)
 DEFINE_TERNARY_GROUP(ibfe, nir_type_int32)
+DEFINE_TERNARY_GROUP(sdot_4x8_iadd, nir_type_int32)
+DEFINE_TERNARY_GROUP(sdot_4x8_iadd_sat, nir_type_int32)
+DEFINE_TERNARY_GROUP(sudot_4x8_iadd, nir_type_int32)
+DEFINE_TERNARY_GROUP(sudot_4x8_iadd_sat, nir_type_int32)
+DEFINE_TERNARY_GROUP(udot_4x8_uadd, nir_type_uint32)
+DEFINE_TERNARY_GROUP(udot_4x8_uadd_sat, nir_type_uint32)
+DEFINE_TERNARY_GROUP(sdot_2x16_iadd, nir_type_int32)
+DEFINE_TERNARY_GROUP(udot_2x16_uadd, nir_type_uint32)
+DEFINE_TERNARY_GROUP(sdot_2x16_iadd_sat, nir_type_int32)
+DEFINE_TERNARY_GROUP(udot_2x16_uadd_sat, nir_type_uint32)
+DEFINE_TERNARY_GROUP(shfr, nir_type_int32)
+DEFINE_TERNARY_GROUP(msad_4x8, nir_type_uint32)
+DEFINE_TERNARY_GROUP(mqsad_4x8, nir_type_uint32)
 
 /* --- Unary Ops (Float & Int) --- */
 DEFINE_UNARY_GROUP(fneg, nir_type_float32)
@@ -261,5 +274,18 @@ struct fsa_nir_microbench_struct fsa_nir_benchlist[] = {
    ENTRY_GROUP(bitfield_select),
    ENTRY_GROUP(ubfe),
    ENTRY_GROUP(ibfe),
+   ENTRY_GROUP(sdot_4x8_iadd),
+   ENTRY_GROUP(sdot_4x8_iadd_sat),
+   ENTRY_GROUP(sudot_4x8_iadd),
+   ENTRY_GROUP(sudot_4x8_iadd_sat),
+   ENTRY_GROUP(udot_4x8_uadd),
+   ENTRY_GROUP(udot_4x8_uadd_sat),
+   ENTRY_GROUP(sdot_2x16_iadd),
+   ENTRY_GROUP(udot_2x16_uadd),
+   ENTRY_GROUP(sdot_2x16_iadd_sat),
+   ENTRY_GROUP(udot_2x16_uadd_sat),
+   ENTRY_GROUP(shfr),
+   ENTRY_GROUP(msad_4x8),
+   ENTRY_GROUP(mqsad_4x8),
    {NULL, NULL, NULL},
 };
