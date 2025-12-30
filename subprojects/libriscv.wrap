@@ -1,4 +1,0 @@
-[wrap-git]
-directory = libriscv
-url = git@git.caslab.ee.ncku.edu.tw:formosa-gpgpu/libriscv.git
-revision = master

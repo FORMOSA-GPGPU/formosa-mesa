@@ -16,6 +16,7 @@ struct fsa_options {
    int compile;
 };
 
+int cmd_compile(int argc, const char **argv);
 struct standalone_options *
 fsa_get_standalone_options(const struct fsa_options *f);
 struct gl_shader_program *fsa_compile_shader(const struct fsa_options *_options,
@@ -23,8 +24,6 @@ struct gl_shader_program *fsa_compile_shader(const struct fsa_options *_options,
                                              char *const *files,
                                              struct gl_context *ctx);
 void fsa_compiler_cleanup(struct gl_shader_program *prog);
-void fsa_compiler_operation(struct gl_shader_program *whole_prog,
-                            const struct fsa_options *options);
 
 LLVMModuleRef fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp);
 

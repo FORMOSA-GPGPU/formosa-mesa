@@ -209,6 +209,190 @@ DEFINE_BINARY_GROUP(ford, nir_type_int32)
       ENTRY(SHORT, vec3, "Vec3", TYPE, 3, GOLDEN),                             \
       ENTRY(SHORT, vec4, "Vec4", TYPE, 4, GOLDEN)
 
+static void
+gen_golden_if(void *dest, void *a, void *b, void *c)
+{
+   int32_t *ia = (int32_t *)a;
+   int32_t *ib = (int32_t *)b;
+   *(int32_t *)dest = *ia < *ib ? *ia : *ib;
+}
+
+static nir_shader *
+gen_if_scalar(const nir_shader_compiler_options *option)
+{
+   PREAMBLE(option);
+   nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *src1 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *cond = nir_ilt(&b, src0, src1);
+   nir_if *nif = nir_push_if(&b, cond);
+   nir_def *res = NULL;
+   {
+      res = src0;
+      nir_def *offset = nir_imm_int(&b, 0);
+      nir_intrinsic_instr *store = nir_store_output(&b, res, offset);
+      nir_intrinsic_set_base(store, VARYING_SLOT_VAR0);
+      nir_intrinsic_set_write_mask(store, 0x1);
+      nir_intrinsic_set_component(store, 0);
+      nir_intrinsic_set_src_type(store, nir_type_int32);
+   }
+   nir_push_else(&b, nif);
+   {
+      res = src1;
+      nir_def *offset = nir_imm_int(&b, 0);
+      nir_intrinsic_instr *store = nir_store_output(&b, res, offset);
+      nir_intrinsic_set_base(store, VARYING_SLOT_VAR0);
+      nir_intrinsic_set_write_mask(store, 0x1);
+      nir_intrinsic_set_component(store, 0);
+      nir_intrinsic_set_src_type(store, nir_type_int32);
+   }
+   nir_pop_if(&b, nif);
+   nir_validate_shader(shader, "manual creation check");
+   return shader;
+}
+
+static void
+gen_golden_if_phi(void *dest, void *a, void *b, void *c)
+{
+   int32_t *ia = (int32_t *)a;
+   int32_t *ib = (int32_t *)b;
+   int32_t *ic = (int32_t *)c;
+   if (*ia < *ib) {
+      *(int32_t*)dest = *ib + *ic;
+   } else {
+      *(int32_t*)dest = *ia + *ib;
+   }
+}
+
+static nir_shader *
+gen_if_phi_scalar(const nir_shader_compiler_options *option)
+{
+   PREAMBLE(option);
+   nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *src1 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *src2 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *res0 = NULL, *res1 = NULL;
+   nir_block *then_block = NULL, *else_block = NULL;
+   nir_if *nif = nir_push_if(&b, nir_ilt(&b, src0, src1));
+   {
+      then_block = nir_cursor_current_block(b.cursor);
+      nir_def *tmp = nir_iadd(&b, src1, src2);
+      res0 = tmp;
+   }
+   nir_push_else(&b, nif);
+   {
+      else_block = nir_cursor_current_block(b.cursor);
+      nir_def *tmp = nir_iadd(&b, src0, src1);
+      res1 = tmp;
+   }
+   nir_pop_if(&b, nif);
+
+   /* Construct phi node */
+   nir_phi_instr *store_val_phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&store_val_phi->instr, &store_val_phi->def, 1, 32);
+   nir_phi_instr_add_src(store_val_phi, then_block, res0);
+   nir_phi_instr_add_src(store_val_phi, else_block, res1);
+   nir_builder_instr_insert(&b, &store_val_phi->instr);
+
+   POSTAMBLE(&store_val_phi->def, 0x1, nir_type_int32);
+}
+
+static nir_shader *
+gen_if_var_scalar(const nir_shader_compiler_options *option)
+{
+   PREAMBLE(option);
+
+   nir_variable *res_var =
+      nir_local_variable_create(b.impl, glsl_int_type(), "res_var");
+
+   nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *src1 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *src2 = nir_load_input(&b, 1, 32, const_z);
+
+   nir_if *nif = nir_push_if(&b, nir_ilt(&b, src0, src1));
+   {
+      nir_def *tmp = nir_iadd(&b, src1, src2);
+      nir_store_var(&b, res_var, tmp, 0x1);
+   }
+   nir_push_else(&b, nif);
+   {
+      nir_def *tmp = nir_iadd(&b, src0, src1);
+      nir_store_var(&b, res_var, tmp, 0x1);
+   }
+   nir_pop_if(&b, nif);
+
+   nir_def *final_val = nir_load_var(&b, res_var);
+   POSTAMBLE(final_val, 0x1, nir_type_int32);
+}
+
+static void
+gen_golden_loop(void *dest, void *a, void *b, void *c)
+{
+   int32_t *ia = (int32_t *)a;
+   uint32_t sum = 0;
+   for (int i = 0; i < 10; i++) {
+      sum += *ia;
+   }
+   *(int32_t *)dest = sum;
+}
+
+/* loop accum using local var */
+static nir_shader *
+gen_loop(const nir_shader_compiler_options *option)
+{
+   PREAMBLE(option);
+   nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
+   nir_def *init_counter = nir_imm_int(&b, 0);
+   nir_def *init_sum = nir_imm_int(&b, 0);
+   nir_def *limit = nir_imm_int(&b, 10);
+
+   nir_block *pred_block = nir_cursor_current_block(b.cursor);
+
+   nir_loop *loop = nir_push_loop(&b);
+   nir_block *header_block = nir_cursor_current_block(b.cursor);
+   /* Counter Phi */
+   nir_phi_instr *counter_phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&counter_phi->instr, &counter_phi->def, 1, 32);
+
+   /* Accum Phi*/
+   nir_phi_instr *sum_phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&sum_phi->instr, &sum_phi->def, 1, 32);
+
+   /* Phi choose value from outside or in the loop */
+   nir_phi_instr_add_src(counter_phi, pred_block, init_counter);
+   nir_phi_instr_add_src(sum_phi, pred_block, init_sum);
+
+   nir_def *current_counter = &counter_phi->def;
+   nir_def *current_sum = &sum_phi->def;
+
+   /* Loop start */
+   nir_def *cmp = nir_ige(&b, current_counter, limit); // i >= 10
+   nir_if *nif = nir_push_if(&b, cmp);
+   {
+      nir_jump(&b, nir_jump_break);
+   }
+   nir_pop_if(&b, nif);
+   /* Loop body */
+   nir_def *next_sum = nir_iadd(&b, current_sum, src0);
+   nir_def *next_counter = nir_iadd_imm(&b, current_counter, 1);
+
+   nir_block *back_edge_block = nir_cursor_current_block(b.cursor);
+   nir_phi_instr_add_src(counter_phi, back_edge_block, next_counter);
+   nir_phi_instr_add_src(sum_phi, back_edge_block, next_sum);
+
+   /* Insert phi node last */
+   nir_cursor end_of_loop_cursor = b.cursor;
+   b.cursor = nir_before_block(header_block);
+   nir_builder_instr_insert(&b, &counter_phi->instr);
+   nir_builder_instr_insert(&b, &sum_phi->instr);
+   b.cursor = end_of_loop_cursor;
+
+   nir_pop_loop(&b, loop);
+
+   current_sum = &sum_phi->def;
+   nir_def *res = current_sum;
+   POSTAMBLE(res, 0x1, nir_type_uint32);
+}
+
 static const float32_t f32_zero = {0x00000000};
 static const float32_t f32_one = {0x3f800000};
 static const float32_t f32_neg_one = {0xbf800000};
@@ -1261,6 +1445,10 @@ struct fsa_nir_microbench_struct fsa_nir_benchlist[] = {
    ENTRY_GROUP(fgeu, 2, gen_golden_fgeu),
    ENTRY_GROUP(funord, 2, gen_golden_funord),
    ENTRY_GROUP(ford, 2, gen_golden_ford),
+   {"if_scalar", "IF scalar using ilt", gen_if_scalar, 2, 1, gen_golden_if},
+   {"if_phi_scalar", "IF + phi", gen_if_phi_scalar, 2, 1, gen_golden_if_phi},
+   {"if_var_scalar", "IF + var", gen_if_var_scalar, 2, 1, gen_golden_if_phi},
+   {"for_loop", "For loop", gen_loop, 1, 1, gen_golden_loop},
    /* End of list */
    {NULL, NULL, NULL, 0, 0},
 };

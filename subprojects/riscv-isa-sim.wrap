@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/riscv-software-src/riscv-isa-sim.git
+revision = master
+depth = 1
+patch_directory = riscv-isa-sim
+
+[provide]
+dependency_names = dep_spike

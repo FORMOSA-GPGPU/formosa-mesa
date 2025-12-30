@@ -4,6 +4,15 @@
 #include <string.h>
 #include <util/macros.h>
 
+#define FSA_LLVM_INITIAL_CF_DEPTH 4
+/* Data for if/else/endif and bgnloop/endloop control flow structures.
+ */
+struct fsa_llvm_flow {
+   /* Loop exit or next part of if/else/endif. */
+   LLVMBasicBlockRef next_block;
+   LLVMBasicBlockRef loop_entry_block;
+};
+
 void
 fsa_llvm_context_init(struct fsa_llvm_context *ctx)
 {
@@ -51,6 +60,9 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
 
    ctx->i1false = LLVMConstInt(ctx->i1, 0, false);
    ctx->i1true = LLVMConstInt(ctx->i1, 1, false);
+
+   /* `calloc` init mem to zero */
+   ctx->flow = calloc(1, sizeof(*ctx->flow));
 }
 
 struct fsa_llvm_pointer
@@ -543,44 +555,21 @@ fsa_eliminate_negative_zero(struct fsa_llvm_context *ctx, LLVMValueRef val)
 LLVMValueRef
 fsa_build_fsign(struct fsa_llvm_context *ctx, LLVMValueRef src)
 {
-   LLVMTypeRef type = LLVMTypeOf(src);
-   LLVMValueRef pos, neg, dw[2], val;
-   unsigned bitsize = fsa_get_elem_bits(ctx, type);
+   unsigned bitsize = fsa_get_elem_bits(ctx, LLVMTypeOf(src));
 
-   /* The standard version leads to this:
-    *   v_cmp_ngt_f32_e64 s[0:1], s4, 0                       ; D40B0000
-    * 00010004 v_cndmask_b32_e64 v4, 1.0, s4, s[0:1]                 ; D5010004
-    * 000008F2 v_cmp_le_f32_e32 vcc, 0, v4                           ; 7C060880
-    *   v_cndmask_b32_e32 v4, -1.0, v4, vcc                   ; 020808F3
-    *
-    * The isign version:
-    *   v_add_f32_e64 v4, s4, 0                               ; D5030004
-    * 00010004 v_med3_i32 v4, v4, -1, 1                              ; D5580004
-    * 02058304 v_cvt_f32_i32_e32 v4, v4                              ; 7E080B04
-    *
-    * (src0 + 0) converts negative zero to positive zero.
-    * After that, int(fsign(x)) == isign(floatBitsToInt(x)).
-    *
-    * For FP64, use the standard version, which doesn't suffer from the huge DP
-    * rate reduction. (FP64 comparisons are as fast as int64 comparisons)
-    */
-   if (bitsize == 16 || bitsize == 32) {
-      val = fsa_to_integer(ctx, fsa_eliminate_negative_zero(ctx, src));
-      val = fsa_build_isign(ctx, val);
-      return LLVMBuildSIToFP(ctx->builder, val, type, "");
-   }
+   /* result = (x > 0) ? 1.0 : ((x < 0) ? -1.0 : 0.0) */
+   LLVMValueRef zero = bitsize == 32 ? ctx->f32_0 : ctx->f64_0;
+   LLVMValueRef one = bitsize == 32 ? ctx->f32_1 : ctx->f64_1;
+   LLVMValueRef neg_one =
+      LLVMConstReal(bitsize == 32 ? ctx->f32 : ctx->f64, -1.0);
+   LLVMValueRef is_pos =
+      LLVMBuildFCmp(ctx->builder, LLVMRealOGT, src, zero, "");
+   LLVMValueRef is_neg =
+      LLVMBuildFCmp(ctx->builder, LLVMRealOLT, src, zero, "");
+   LLVMValueRef neg_or_zero =
+      LLVMBuildSelect(ctx->builder, is_neg, neg_one, zero, "");
 
-   assert(bitsize == 64);
-   pos = LLVMBuildFCmp(ctx->builder, LLVMRealOGT, src, ctx->f64_0, "");
-   neg = LLVMBuildFCmp(ctx->builder, LLVMRealOLT, src, ctx->f64_0, "");
-   dw[0] = ctx->i32_0;
-   dw[1] = LLVMBuildSelect(
-      ctx->builder, pos, LLVMConstInt(ctx->i32, 0x3FF00000, 0),
-      LLVMBuildSelect(ctx->builder, neg, LLVMConstInt(ctx->i32, 0xBFF00000, 0),
-                      ctx->i32_0, ""),
-      "");
-   return LLVMBuildBitCast(ctx->builder, fsa_build_gather_values(ctx, dw, 2),
-                           ctx->f64, "");
+   return LLVMBuildSelect(ctx->builder, is_pos, one, neg_or_zero, "");
 }
 
 LLVMValueRef
@@ -1530,4 +1519,164 @@ fsa_build_mqsad_4x8(struct fsa_llvm_context *ctx, LLVMValueRef args[3])
    }
 
    return res_vec;
+}
+
+static struct fsa_llvm_flow *
+push_flow(struct fsa_llvm_context *ctx)
+{
+   struct fsa_llvm_flow *flow;
+
+   if (ctx->flow->depth >= ctx->flow->depth_max) {
+      unsigned new_max = MAX2(ctx->flow->depth << 1, FSA_LLVM_INITIAL_CF_DEPTH);
+
+      ctx->flow->stack =
+         realloc(ctx->flow->stack, new_max * sizeof(*ctx->flow->stack));
+      ctx->flow->depth_max = new_max;
+   }
+
+   flow = &ctx->flow->stack[ctx->flow->depth];
+   ctx->flow->depth++;
+
+   flow->next_block = NULL;
+   flow->loop_entry_block = NULL;
+   return flow;
+}
+
+/* Append a basic block at the level of the parent flow.
+ */
+static LLVMBasicBlockRef
+append_basic_block(struct fsa_llvm_context *ctx, const char *name)
+{
+   assert(ctx->flow->depth >= 1);
+
+   if (ctx->flow->depth >= 2) {
+      struct fsa_llvm_flow *flow = &ctx->flow->stack[ctx->flow->depth - 2];
+
+      return LLVMInsertBasicBlockInContext(ctx->context, flow->next_block,
+                                           name);
+   }
+
+   LLVMValueRef main_fn =
+      LLVMGetBasicBlockParent(LLVMGetInsertBlock(ctx->builder));
+   return LLVMAppendBasicBlockInContext(ctx->context, main_fn, name);
+}
+
+static void
+set_basicblock_name(LLVMBasicBlockRef bb, const char *base, int label_id)
+{
+   char buf[32];
+   snprintf(buf, sizeof(buf), "%s%d", base, label_id);
+   LLVMSetValueName(LLVMBasicBlockAsValue(bb), buf);
+}
+
+void
+fsa_build_ifcc(struct fsa_llvm_context *ctx, LLVMValueRef cond, int label_id)
+{
+   struct fsa_llvm_flow *flow = push_flow(ctx);
+   LLVMBasicBlockRef if_block;
+
+   if_block = append_basic_block(ctx, "IF");
+   flow->next_block = append_basic_block(ctx, "ELSE");
+   set_basicblock_name(if_block, "if", label_id);
+   LLVMBuildCondBr(ctx->builder, cond, if_block, flow->next_block);
+   LLVMPositionBuilderAtEnd(ctx->builder, if_block);
+}
+
+static struct fsa_llvm_flow *
+get_current_flow(struct fsa_llvm_context *ctx)
+{
+   if (ctx->flow->depth > 0)
+      return &ctx->flow->stack[ctx->flow->depth - 1];
+   return NULL;
+}
+
+/* Emit a branch to the given default target for the current block if
+ * applicable -- that is, if the current block does not already contain a
+ * branch from a break or continue.
+ */
+static void
+emit_default_branch(LLVMBuilderRef builder, LLVMBasicBlockRef target)
+{
+   if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder)))
+      LLVMBuildBr(builder, target);
+}
+
+void
+fsa_build_else(struct fsa_llvm_context *ctx, int label_id)
+{
+   struct fsa_llvm_flow *current_branch = get_current_flow(ctx);
+   LLVMBasicBlockRef endif_block;
+
+   assert(!current_branch->loop_entry_block);
+
+   endif_block = append_basic_block(ctx, "ENDIF");
+   emit_default_branch(ctx->builder, endif_block);
+
+   LLVMPositionBuilderAtEnd(ctx->builder, current_branch->next_block);
+   set_basicblock_name(current_branch->next_block, "else", label_id);
+
+   current_branch->next_block = endif_block;
+}
+
+void
+fsa_build_endif(struct fsa_llvm_context *ctx, int label_id)
+{
+   struct fsa_llvm_flow *current_branch = get_current_flow(ctx);
+
+   assert(!current_branch->loop_entry_block);
+
+   emit_default_branch(ctx->builder, current_branch->next_block);
+   LLVMPositionBuilderAtEnd(ctx->builder, current_branch->next_block);
+   set_basicblock_name(current_branch->next_block, "endif", label_id);
+
+   ctx->flow->depth--;
+}
+
+void
+fsa_build_bgnloop(struct fsa_llvm_context *ctx, int label_id)
+{
+   struct fsa_llvm_flow *flow = push_flow(ctx);
+   flow->loop_entry_block = append_basic_block(ctx, "LOOP");
+   flow->next_block = append_basic_block(ctx, "ENDLOOP");
+   set_basicblock_name(flow->loop_entry_block, "loop", label_id);
+   LLVMBuildBr(ctx->builder, flow->loop_entry_block);
+   LLVMPositionBuilderAtEnd(ctx->builder, flow->loop_entry_block);
+}
+
+void
+fsa_build_endloop(struct fsa_llvm_context *ctx, int label_id)
+{
+   struct fsa_llvm_flow *current_loop = get_current_flow(ctx);
+
+   assert(current_loop->loop_entry_block);
+
+   emit_default_branch(ctx->builder, current_loop->loop_entry_block);
+
+   LLVMPositionBuilderAtEnd(ctx->builder, current_loop->next_block);
+   set_basicblock_name(current_loop->next_block, "endloop", label_id);
+   ctx->flow->depth--;
+}
+
+static struct fsa_llvm_flow *
+get_innermost_loop(struct fsa_llvm_context *ctx)
+{
+   for (unsigned i = ctx->flow->depth; i > 0; --i) {
+      if (ctx->flow->stack[i - 1].loop_entry_block)
+         return &ctx->flow->stack[i - 1];
+   }
+   return NULL;
+}
+
+void
+fsa_build_break(struct fsa_llvm_context *ctx)
+{
+   struct fsa_llvm_flow *flow = get_innermost_loop(ctx);
+   LLVMBuildBr(ctx->builder, flow->next_block);
+}
+
+void
+fsa_build_continue(struct fsa_llvm_context *ctx)
+{
+   struct fsa_llvm_flow *flow = get_innermost_loop(ctx);
+   LLVMBuildBr(ctx->builder, flow->loop_entry_block);
 }

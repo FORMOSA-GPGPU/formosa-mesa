@@ -19,6 +19,7 @@ struct fsa_nir_context {
 
    struct hash_table *func_map;
    struct hash_table *defs;
+   struct hash_table *phis;
 };
 
 void
@@ -650,7 +651,7 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       break;
    case nir_op_fround_even:
       result =
-         emit_intrin_1f_param(&ctx->fsa, "llvm.rint",
+         emit_intrin_1f_param(&ctx->fsa, "llvm.roundeven",
                               fsa_to_float_type(&ctx->fsa, def_type), src[0]);
       break;
    case nir_op_ffract:
@@ -1182,9 +1183,96 @@ visit_load_const(struct fsa_nir_context *ctx, const nir_load_const_instr *instr)
       nir_const_value_as_uint(instr->value[0], instr->def.bit_size), false);
 }
 
+static void
+visit_phi(struct fsa_nir_context *ctx, nir_phi_instr *instr)
+{
+   LLVMTypeRef type = get_def_type(ctx, &instr->def);
+   LLVMValueRef result = LLVMBuildPhi(ctx->fsa.builder, type, "");
+
+   ctx->ssa_defs[instr->def.index] = result;
+   _mesa_hash_table_insert(ctx->phis, instr, result);
+}
+
+static LLVMBasicBlockRef
+get_block(struct fsa_nir_context *nir, const struct nir_block *b)
+{
+   struct hash_entry *entry = _mesa_hash_table_search(nir->defs, b);
+   return (LLVMBasicBlockRef)entry->data;
+}
+
+static void
+visit_post_phi(struct fsa_nir_context *ctx, nir_phi_instr *instr,
+               LLVMValueRef llvm_phi)
+{
+   nir_foreach_phi_src (src, instr) {
+      LLVMBasicBlockRef block = get_block(ctx, src->pred);
+      LLVMValueRef llvm_src = get_src(ctx, src->src);
+
+      LLVMAddIncoming(llvm_phi, &llvm_src, &block, 1);
+   }
+}
+
+static void
+phi_post_pass(struct fsa_nir_context *ctx)
+{
+   hash_table_foreach (ctx->phis, entry) {
+      visit_post_phi(ctx, (nir_phi_instr *)entry->key,
+                     (LLVMValueRef)entry->data);
+   }
+}
+
+static bool
+visit_jump(struct fsa_llvm_context *ctx, const nir_jump_instr *instr)
+{
+   switch (instr->type) {
+   case nir_jump_break:
+      fsa_build_break(ctx);
+      break;
+   case nir_jump_continue:
+      fsa_build_continue(ctx);
+      break;
+   default:
+      fprintf(stderr, "Unknown NIR jump instr: ");
+      nir_print_instr(&instr->instr, stderr);
+      fprintf(stderr, "\n");
+      return false;
+   }
+   return true;
+}
+
+static void
+visit_ssa_undef(struct fsa_nir_context *ctx, const nir_undef_instr *instr)
+{
+   unsigned num_components = instr->def.num_components;
+   LLVMTypeRef type =
+      LLVMIntTypeInContext(ctx->fsa.context, instr->def.bit_size);
+
+   LLVMValueRef undef;
+
+   if (num_components == 1)
+      undef = LLVMGetUndef(type);
+   else {
+      undef = LLVMGetUndef(LLVMVectorType(type, num_components));
+   }
+   ctx->ssa_defs[instr->def.index] = undef;
+}
+
 static bool
 visit_block(struct fsa_nir_context *ctx, nir_block *block)
 {
+   LLVMBasicBlockRef blockref = LLVMGetInsertBlock(ctx->fsa.builder);
+   LLVMValueRef first = LLVMGetFirstInstruction(blockref);
+   if (first) {
+      /* LLVM phi nodes must be grouped together and placed at the beginning of
+       * each block */
+      LLVMPositionBuilderBefore(ctx->fsa.builder,
+                                LLVMGetFirstInstruction(blockref));
+   }
+
+   nir_foreach_phi (phi, block) {
+      visit_phi(ctx, phi);
+   }
+
    nir_foreach_instr (instr, block) {
       switch (instr->type) {
       case nir_instr_type_alu:
@@ -1195,7 +1283,17 @@ visit_block(struct fsa_nir_context *ctx, nir_block *block)
          visit_load_const(ctx, nir_instr_as_load_const(instr));
          break;
       case nir_instr_type_intrinsic:
-         visit_intrinsic(ctx, nir_instr_as_intrinsic(instr));
+         if (!visit_intrinsic(ctx, nir_instr_as_intrinsic(instr)))
+            return false;
+         break;
+      case nir_instr_type_phi:
+         break;
+      case nir_instr_type_undef:
+         visit_ssa_undef(ctx, nir_instr_as_undef(instr));
+         break;
+      case nir_instr_type_jump:
+         if (!visit_jump(&ctx->fsa, nir_instr_as_jump(instr)))
+            return false;
          break;
       default:
          printf("[V_BLOCK] Type: %d not implemented,Instr: ", instr->type);
@@ -1204,7 +1302,51 @@ visit_block(struct fsa_nir_context *ctx, nir_block *block)
          exit(-1);
       }
    }
-   LLVMGetInsertBlock(ctx->fsa.builder);
+
+   /* Store nir_block to LLVMBlockRef mapping for phi node post pass reference */
+   _mesa_hash_table_insert(ctx->defs, block,
+                           LLVMGetInsertBlock(ctx->fsa.builder));
+   return true;
+}
+
+static bool visit_cf_list(struct fsa_nir_context *ctx, struct exec_list *list);
+/* nir_if is also a node. recursively visit the then/else statements */
+static bool
+visit_if(struct fsa_nir_context *ctx, nir_if *if_stmt)
+{
+   LLVMValueRef value = get_src(ctx, if_stmt->condition);
+   nir_block *then_block = (nir_block *)exec_list_get_head(&if_stmt->then_list);
+   fsa_build_ifcc(&ctx->fsa, value, then_block->index);
+
+   /* recursively visit */
+   if (!visit_cf_list(ctx, &if_stmt->then_list))
+      return false;
+
+   if (!exec_list_is_empty(&if_stmt->else_list)) {
+      nir_block *else_block =
+         (nir_block *)exec_list_get_head(&if_stmt->else_list);
+
+      fsa_build_else(&ctx->fsa, else_block->index);
+      if (!visit_cf_list(ctx, &if_stmt->else_list))
+         return false;
+   }
+
+   fsa_build_endif(&ctx->fsa, then_block->index);
+   return true;
+}
+
+static bool
+visit_loop(struct fsa_nir_context *ctx, nir_loop *loop)
+{
+   assert(!nir_loop_has_continue_construct(loop));
+   nir_block *first_loop_block = (nir_block *)exec_list_get_head(&loop->body);
+
+   fsa_build_bgnloop(&ctx->fsa, first_loop_block->index);
+
+   if (!visit_cf_list(ctx, &loop->body))
+      return false;
+
+   fsa_build_endloop(&ctx->fsa, first_loop_block->index);
    return true;
 }
 
@@ -1219,7 +1361,15 @@ visit_cf_list(struct fsa_nir_context *ctx, struct exec_list *list)
          }
          break;
       case nir_cf_node_if:
+         if (!visit_if(ctx, nir_cf_node_as_if(node))) {
+            return false;
+         }
+         break;
       case nir_cf_node_loop:
+         if (!visit_loop(ctx, nir_cf_node_as_loop(node))) {
+            return false;
+         }
+         break;
       case nir_cf_node_function:
       default:
          printf("[V_CF_LIST] Type %d not implemented\n", node->type);
@@ -1337,6 +1487,7 @@ bool
 fsa_nir_translate(struct fsa_llvm_context *fsa, struct nir_shader *nir)
 {
    struct fsa_nir_context ctx = {0};
+   bool ret = true;
    ctx.fsa = *fsa;
    ctx.stage = nir->info.stage;
    ctx.info = &nir->info;
@@ -1345,21 +1496,25 @@ fsa_nir_translate(struct fsa_llvm_context *fsa, struct nir_shader *nir)
 
    /* Create LLVM function for each nir function */
    nir_foreach_function (func, nir) {
+      if (!ret)
+         break;
       create_llvm_function(&ctx, func);
-      ctx.ssa_defs =
-         realloc(ctx.ssa_defs, sizeof(LLVMValueRef) * func->impl->ssa_alloc);
-   }
+      nir_index_ssa_defs(func->impl);
+      ctx.ssa_defs = calloc(func->impl->ssa_alloc, sizeof(LLVMValueRef));
 
-   /* Start lowering function body */
-   nir_foreach_function (func, nir) {
+      /* Start lowering function body */
       ctx.defs = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
                                          _mesa_key_pointer_equal);
-      if (!visit_function(&ctx, func)) {
-         return false;
+      ctx.phis = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
+                                         _mesa_key_pointer_equal);
+      if ((ret = visit_function(&ctx, func))) {
+         phi_post_pass(&ctx);
       }
-      _mesa_hash_table_destroy(ctx.defs, NULL);
+      ralloc_free(ctx.defs);
+      ralloc_free(ctx.phis);
+      free(ctx.ssa_defs);
    }
 
    _mesa_hash_table_destroy(ctx.func_map, NULL);
-   return true;
+   return ret;
 }

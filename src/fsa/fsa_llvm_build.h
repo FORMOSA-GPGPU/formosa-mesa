@@ -4,6 +4,13 @@
 #include <stdbool.h>
 #include <llvm-c/Core.h>
 
+struct fsa_llvm_flow;
+struct fsa_llvm_flow_state {
+   struct fsa_llvm_flow *stack;
+   unsigned depth_max;
+   unsigned depth;
+};
+
 struct fsa_llvm_pointer {
    union {
       LLVMValueRef value;
@@ -62,6 +69,8 @@ struct fsa_llvm_context {
    LLVMValueRef f64_1;
    LLVMValueRef i1true;
    LLVMValueRef i1false;
+
+   struct fsa_llvm_flow_state *flow;
 };
 
 void fsa_print_llvm_type(const char *label, LLVMTypeRef t);
@@ -187,5 +196,13 @@ LLVMValueRef fsa_build_msad_4x8(struct fsa_llvm_context *ctx,
                                 LLVMValueRef args[3]);
 LLVMValueRef fsa_build_mqsad_4x8(struct fsa_llvm_context *ctx,
                                  LLVMValueRef args[3]);
+void fsa_build_ifcc(struct fsa_llvm_context *ctx, LLVMValueRef cond,
+                    int label_id);
+void fsa_build_else(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_endif(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_bgnloop(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_endloop(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_break(struct fsa_llvm_context *ctx);
+void fsa_build_continue(struct fsa_llvm_context *ctx);
 
 #endif

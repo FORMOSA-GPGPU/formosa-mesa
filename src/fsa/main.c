@@ -9,8 +9,10 @@
 #include <string.h>
 #include "argparse.h"
 #include "fsa_bench.h"
+#include "fsa_compiler.h"
 
 static const char *const usages[] = {
+   "fsa_compiler compile",
    "fsa_compiler bench",
    NULL,
 };
@@ -43,6 +45,8 @@ main(int argc, const char **argv)
 
    if (strcmp(subcommand, "bench") == 0) {
       return cmd_bench(argc, argv);
+   } else if(strcmp(subcommand, "compile") == 0) {
+      return cmd_compile(argc, argv);
    } else {
       fprintf(stderr, "Unknown subcommand: %s\n", subcommand);
       return -1;

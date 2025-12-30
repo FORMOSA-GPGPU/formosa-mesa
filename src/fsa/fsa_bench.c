@@ -68,10 +68,12 @@ fsa_bench_compile_test(FILE *fp, int index)
       .lower_unpack_32_2x16_split = true,
    };
    nir_shader *shader = fsa_nir_benchlist[index].gen_nir(&option);
+   nir_lower_vars_to_ssa(shader);
    nir_lower_io_to_scalar(shader, nir_var_shader_in | nir_var_shader_out, NULL,
                           NULL);
    nir_lower_alu_to_scalar(shader, NULL, NULL);
    nir_lower_load_const_to_scalar(shader);
+   nir_opt_dce(shader);
    return fsa_standalone_nir_to_llvm(shader, fp);
 }
 
@@ -98,22 +100,33 @@ bench_compile(int argc, const char **argv)
 }
 
 static int
-bench_run_index(FILE *fp, int i)
+bench_run_index(FILE *fp, int i, int backend)
 {
+   printf("%s\n", fsa_nir_benchlist[i].name);
    LLVMModuleRef mod = fsa_bench_compile_test(fp, i);
+   if (backend == 0) {
    return fsa_llvm_verify_host(mod, fsa_nir_benchlist[i].op_type,
                                fsa_nir_benchlist[i].num_ele,
                                fsa_nir_benchlist[i].gen_golden);
+   } else if (backend == 1) {
+      return fsa_llvm_verify_spike(mod, fsa_nir_benchlist[i].op_type,
+                               fsa_nir_benchlist[i].num_ele,
+                               fsa_nir_benchlist[i].gen_golden);
+   } else {
+      printf("Unsupported backend: %d\n", backend);
+   }
+   return -1;
 }
 
 static int
-bench_run_all(FILE *fp)
+bench_run_all(FILE *fp, int backend)
 {
    fsa_llvm_verify_host_init();
+   fsa_llvm_verify_riscv_init();
    int count = fsa_bench_count();
    for (int i = 0; i < count; i++) {
-      printf("Running test (%d/%d)\n", i, count - 1);
-      if (bench_run_index(NULL, i))
+      printf("Running test (%d/%d): ", i, count - 1);
+      if (bench_run_index(NULL, i, backend))
          return -1;
    }
    return 0;
@@ -158,8 +171,10 @@ bench_seed_cb(struct argparse *argparse, const struct argparse_option *opt)
 static int
 bench_run(int argc, const char **argv)
 {
+   int backend = 0;
    struct argparse_option options[] = {
       OPT_INTEGER('s', "seed", &randseed, "Random seed", bench_seed_cb, 0, 1),
+      OPT_INTEGER('b', "backend", &backend, "Backend", NULL, 0, 1),
       OPT_HELP(),
       OPT_END(),
    };
@@ -172,7 +187,7 @@ bench_run(int argc, const char **argv)
    argc = argparse_parse(&argparse, argc, argv);
 
    if (argc > 0 && !strncmp(argv[0], "all", 3)) {
-      return bench_run_all(stdout);
+      return bench_run_all(stdout, backend);
    }
 
    int bench_index = -1;
@@ -191,7 +206,8 @@ bench_run(int argc, const char **argv)
       return -1;
    }
    fsa_llvm_verify_host_init();
-   return bench_run_index(stdout, bench_index);
+   fsa_llvm_verify_riscv_init();
+   return bench_run_index(stdout, bench_index, backend);
 }
 
 int
