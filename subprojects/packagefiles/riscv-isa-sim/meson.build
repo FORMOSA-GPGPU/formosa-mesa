@@ -7,6 +7,7 @@ p = mod.add_project('configure',
     '--without-boost',
     '--prefix=@PREFIX@',
   ],
+  verbose : true,
 )
 
 libriscv = p.dependency('riscv') 

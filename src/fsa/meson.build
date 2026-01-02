@@ -38,6 +38,16 @@ files_libm = files(
   'libm/scalbnf.c',
 )
 
+# formosa for uscsim
+cmake = import('cmake')
+formosa_opt = cmake.subproject_options()
+formosa_opt.add_cmake_defines({
+  'CMAKE_BUILD_TYPE': 'Debug',
+  'ENABLE_PROJECTS': 'gfx',
+})
+formosa = cmake.subproject('formosa', options: formosa_opt)
+dep_uscsim = formosa.dependency('uscsim')
+
 # Force use fsa-llvm
 llvm_bindir = dep_llvm.get_variable(configtool: 'bindir')
 fsa_clang = find_program('clang', dirs: [llvm_bindir])
@@ -138,6 +148,8 @@ dep_ncurses = dependency('ncurses')
 dep_libsoftfloat = dependency('berkeley-softfloat-3')
 dep_spike = dependency('riscv-isa-sim')
 
+fsa_rpath = meson.global_build_root()/'subprojects/riscv-isa-sim/build' + ':'
+
 fsa_compiler = executable(
   'fsa_compiler',
   [
@@ -159,6 +171,7 @@ fsa_compiler = executable(
     dep_elf,
     dep_lld,
     dep_spike,
+    dep_uscsim,
   ],
   include_directories : [
     inc_include,
@@ -169,5 +182,6 @@ fsa_compiler = executable(
     inc_gallium_aux
   ],
   link_with : [libglsl_standalone],
+  build_rpath: fsa_rpath,
   install: true
 )
