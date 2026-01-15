@@ -6,5 +6,6 @@
 #include "fsa_llvm_build.h"
 
 bool fsa_nir_translate(struct fsa_llvm_context *ctx, struct nir_shader *nir);
+void fsa_print_llvm_module(LLVMModuleRef module, FILE *fp);
 
 #endif

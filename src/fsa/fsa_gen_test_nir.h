@@ -6,8 +6,13 @@
 struct fsa_nir_microbench_struct {
    const char *name;
    const char *desc;
-   nir_shader *(*fn)(const nir_shader_compiler_options *);
+   nir_shader *(*gen_nir)(const nir_shader_compiler_options *);
+   int op_type;
+   int num_ele;
+   void (*gen_golden)(void *dest, void *a, void *b, void *c);
 };
 extern struct fsa_nir_microbench_struct fsa_nir_benchlist[];
+
+uint32_t gen_valid_float(void);
 
 #endif

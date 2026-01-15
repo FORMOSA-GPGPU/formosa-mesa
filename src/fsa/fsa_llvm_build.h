@@ -4,6 +4,13 @@
 #include <stdbool.h>
 #include <llvm-c/Core.h>
 
+struct fsa_llvm_flow;
+struct fsa_llvm_flow_state {
+   struct fsa_llvm_flow *stack;
+   unsigned depth_max;
+   unsigned depth;
+};
+
 struct fsa_llvm_pointer {
    union {
       LLVMValueRef value;
@@ -44,6 +51,11 @@ struct fsa_llvm_context {
    LLVMTypeRef v3f32;
    LLVMTypeRef v4f32;
 
+   LLVMTypeRef ptrt;
+   LLVMTypeRef gfx_info_t;
+   LLVMTypeRef gfx_state_t;
+   LLVMTypeRef gfx_layout_t;
+
    LLVMValueRef i8_0;
    LLVMValueRef i8_1;
    LLVMValueRef i16_0;
@@ -62,6 +74,11 @@ struct fsa_llvm_context {
    LLVMValueRef f64_1;
    LLVMValueRef i1true;
    LLVMValueRef i1false;
+
+   struct fsa_llvm_flow_state *flow;
+
+   /* Flags to determine compilation for spike or uscsim */
+   bool is_cpu;
 };
 
 void fsa_print_llvm_type(const char *label, LLVMTypeRef t);
@@ -187,5 +204,38 @@ LLVMValueRef fsa_build_msad_4x8(struct fsa_llvm_context *ctx,
                                 LLVMValueRef args[3]);
 LLVMValueRef fsa_build_mqsad_4x8(struct fsa_llvm_context *ctx,
                                  LLVMValueRef args[3]);
+void fsa_build_ifcc(struct fsa_llvm_context *ctx, LLVMValueRef cond,
+                    int label_id);
+void fsa_build_else(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_endif(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_bgnloop(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_endloop(struct fsa_llvm_context *ctx, int label_id);
+void fsa_build_break(struct fsa_llvm_context *ctx);
+void fsa_build_continue(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_csr_read(struct fsa_llvm_context *ctx,
+                                const char *csr_name);
+LLVMValueRef fsa_build_local_id(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_global_id(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_info_ptr(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_get_gfx_info_member_ptr(struct fsa_llvm_context *ctx,
+                                               int idx);
+
+typedef enum {
+   fsa_vert_attrib = 0,
+   fsa_vary_slot_pos,
+   fsa_vary_slot_tex,
+   fsa_vary_slot_var,
+   fsa_frag_result,
+} fsa_gfx_state_member;
+
+LLVMValueRef fsa_build_get_gfx_state_layout_ptr(struct fsa_llvm_context *ctx,
+                                                fsa_gfx_state_member member,
+                                                int idx);
+LLVMValueRef fsa_build_get_gfx_layout_base(struct fsa_llvm_context *ctx,
+                                           fsa_gfx_state_member member,
+                                           int idx);
+LLVMValueRef fsa_build_get_gfx_layout_stride(struct fsa_llvm_context *ctx,
+                                             fsa_gfx_state_member member,
+                                             int idx);
 
 #endif

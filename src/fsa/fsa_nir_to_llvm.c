@@ -19,7 +19,18 @@ struct fsa_nir_context {
 
    struct hash_table *func_map;
    struct hash_table *defs;
+   struct hash_table *phis;
 };
+
+void
+fsa_print_llvm_module(LLVMModuleRef module, FILE *fp)
+{
+   if (!fp)
+      return;
+   char *ir_str = LLVMPrintModuleToString(module);
+   fprintf(fp, "###### DUMPING LLVM IR ######\n%s\n", ir_str);
+   LLVMDisposeMessage(ir_str);
+}
 
 static LLVMTypeRef
 get_def_type(struct fsa_nir_context *ctx, const nir_def *def)
@@ -364,6 +375,24 @@ emit_imul_high(struct fsa_llvm_context *ctx, LLVMValueRef src0,
    return result;
 }
 
+static LLVMValueRef
+emit_mul24(struct fsa_llvm_context *ctx, LLVMValueRef src0, LLVMValueRef src1,
+           bool sign)
+{
+   LLVMValueRef result, shamt = LLVMConstInt(ctx->i32, 8, false);
+   src0 = LLVMBuildShl(ctx->builder, src0, shamt, "");
+   src1 = LLVMBuildShl(ctx->builder, src1, shamt, "");
+   if (sign) {
+      src0 = LLVMBuildAShr(ctx->builder, src0, shamt, "");
+      src1 = LLVMBuildAShr(ctx->builder, src1, shamt, "");
+   } else {
+      src0 = LLVMBuildLShr(ctx->builder, src0, shamt, "");
+      src1 = LLVMBuildLShr(ctx->builder, src1, shamt, "");
+   }
+   result = LLVMBuildMul(ctx->builder, src0, src1, "");
+   return result;
+}
+
 static void
 nir_op_error(const nir_instr *instr, const char *msg)
 {
@@ -460,9 +489,13 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       result = LLVMBuildSub(ctx->fsa.builder, src[0], src[1], "");
       break;
    case nir_op_imul:
-   case nir_op_imul24_relaxed:
-   case nir_op_umul24_relaxed:
       result = LLVMBuildMul(ctx->fsa.builder, src[0], src[1], "");
+      break;
+   case nir_op_imul24_relaxed:
+      result = emit_mul24(&ctx->fsa, src[0], src[1], true);
+      break;
+   case nir_op_umul24_relaxed:
+      result = emit_mul24(&ctx->fsa, src[0], src[1], false);
       break;
    case nir_op_fmul:
    case nir_op_fmulz: // If one of the result is zero, result is always +0
@@ -618,7 +651,7 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       break;
    case nir_op_fround_even:
       result =
-         emit_intrin_1f_param(&ctx->fsa, "llvm.rint",
+         emit_intrin_1f_param(&ctx->fsa, "llvm.roundeven",
                               fsa_to_float_type(&ctx->fsa, def_type), src[0]);
       break;
    case nir_op_ffract:
@@ -1059,10 +1092,14 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
    return true;
 }
 
+static int load_count = 0;
+static int store_count = 0;
+
+/* Used for host (LLVMMCJit and spike) debug */
 static LLVMValueRef
-visit_load(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
+visit_load_input_cpu(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
-   LLVMValueRef values[8];
+   assert(instr->def.num_components == 1);
    LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
    /*
       base = which slot , e.g. layout(location = 5) -> base = 5
@@ -1070,57 +1107,92 @@ visit_load(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
       count = how many comps to read, .yz -> count = 2
       offset = array index, there is type like in vec3[4] aPos
    */
-   unsigned base = nir_intrinsic_base(instr);
    unsigned component = nir_intrinsic_component(instr);
-   unsigned count = instr->def.num_components;
-   nir_src offset = *nir_get_io_offset_src(instr);
+
+   uint64_t addr = 0x87650000 + component * 4 + (load_count++ << 8);
 
    LLVMValueRef result = LLVMGetUndef(dest_type);
-   /* Scalar */
-   if (LLVMGetTypeKind(dest_type) != LLVMVectorTypeKind) {
-      LLVMValueRef input_addr = LLVMConstInt(ctx->fsa.i64, 87654321, 0);
-      return fsa_build_load_input_to_scalar(&ctx->fsa, input_addr, result);
-   }
-
-   /* Cector */
-   if (ctx->stage == MESA_SHADER_VERTEX) {
-      for (unsigned chan = 0; chan < count; chan++) {
-         /* Fake input address, TODO */
-         LLVMValueRef input_addr =
-            LLVMConstInt(ctx->fsa.i64, 0x87654300 + chan * 8, 0);
-         LLVMValueRef idx = LLVMConstInt(ctx->fsa.i32, chan, 0);
-         result =
-            fsa_build_load_input_to_vector(&ctx->fsa, input_addr, result, idx);
-      }
-   } else if (ctx->stage == MESA_SHADER_FRAGMENT) {
-      for (unsigned chan = 0; chan < count; chan++) {
-         /* Fake input address, TODO */
-         LLVMValueRef input_addr =
-            LLVMConstInt(ctx->fsa.i64, 0x87654300 + chan * 8, 0);
-         LLVMValueRef idx = LLVMConstInt(ctx->fsa.i32, chan, 0);
-         result =
-            fsa_build_load_input_to_vector(&ctx->fsa, input_addr, result, idx);
-      }
-   }
-
-   return result;
+   LLVMValueRef input_addr = LLVMConstInt(ctx->fsa.i64, addr, 0);
+   return fsa_build_load_input_to_scalar(&ctx->fsa, input_addr, result);
 }
 
-static void
-visit_store_output(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
+/*
+   1. Get layout (base + stride)
+   2. Get global id
+   3. base + id * stride
+   4. Load val
+*/
+static LLVMValueRef
+visit_load_input_gpu_trivial(struct fsa_nir_context *ctx,
+                             nir_intrinsic_instr *instr)
 {
+   /* fsa only deals with scalar io */
+   assert(instr->def.num_components == 1);
+   /* Calculate offset into gfx_state based on slot */
+   fsa_gfx_state_member member;
+   unsigned idx = 0;
+   nir_io_semantics ios = nir_intrinsic_io_semantics(instr);
+   if (ctx->stage == MESA_SHADER_VERTEX) {
+      gl_vert_attrib attr = (gl_vert_attrib)ios.location;
+      if (attr < VERT_ATTRIB_GENERIC0 || attr > VERT_ATTRIB_GENERIC15) {
+         printf("Invalid vert attrib slot: %d\n", attr);
+         exit(-1);
+      }
+      member = fsa_vert_attrib;
+      idx = attr - VERT_ATTRIB_GENERIC0;
+   } else {
+      gl_varying_slot slot = (gl_varying_slot)ios.location;
+      if (slot == VARYING_SLOT_POS) {
+         member = fsa_vary_slot_pos;
+      } else if (slot >= VARYING_SLOT_TEX0 && slot <= VARYING_SLOT_TEX7) {
+         member = fsa_vary_slot_tex;
+      } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
+         member = fsa_vary_slot_var;
+         idx = slot - VARYING_SLOT_VAR0;
+      } else {
+         printf("Unsupported FS input slot\n");
+         exit(-1);
+      }
+   }
+   LLVMValueRef base = fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx);
+   LLVMValueRef stride =
+      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx);
+   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa);
+   /* ele base address = base + global_id * stride */
+   LLVMValueRef addr_val = LLVMBuildAdd(
+      ctx->fsa.builder,
+      LLVMBuildMul(ctx->fsa.builder, stride, global_id, "global_id_x_stride"),
+      base, "base_addr");
+   int component = nir_intrinsic_component(instr);
+   unsigned bit_size =
+      fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(get_src(ctx, instr->src[0])));
+   assert("Only supports float now" && bit_size == 32);
+   LLVMValueRef addr_offset =
+      LLVMConstInt(ctx->fsa.i64, component * bit_size / 8, false);
+   addr_val = LLVMBuildAdd(ctx->fsa.builder, addr_val, addr_offset,
+                           "base_addr_plus_offset");
+
+   /* Now that we get the addr, load the final scalar value */
+   LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
+   LLVMTypeRef dest_ptr_type = LLVMPointerType(dest_type, 0);
+   LLVMValueRef ptr = LLVMBuildIntToPtr(ctx->fsa.builder, addr_val,
+                                        dest_ptr_type, "load_input_ptr");
+   return LLVMBuildLoad2(ctx->fsa.builder, dest_type, ptr, "load_input_val");
+}
+
+/* fsa only deals with scalar io */
+static void
+visit_store_output_cpu(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
+{
+   /* store_output val=src[0] no def */
+   assert(instr->src[0].ssa->num_components == 1);
    unsigned base = nir_intrinsic_base(instr);
-   unsigned writemask = nir_intrinsic_write_mask(instr);
    unsigned component = nir_intrinsic_component(instr);
    LLVMValueRef src = fsa_to_float(&ctx->fsa, get_src(ctx, instr->src[0]));
    ASSERTED unsigned bit_size = fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(src));
    ASSERTED nir_src offset = *nir_get_io_offset_src(instr);
 
    LLVMTypeRef elem_type = LLVMTypeOf(src);
-   if (LLVMGetTypeKind(elem_type) == LLVMVectorTypeKind) {
-      elem_type = LLVMGetElementType(elem_type);
-   }
-
    /*
       base = which slot
       writemask start at bit 0
@@ -1130,19 +1202,79 @@ visit_store_output(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
       writemask <<= 1 -> 0110
    */
 
-   writemask <<= component;
+   uint64_t addr = 0x12340000 + component * 4 + (store_count++ << 8);
+   /* Fake output address, TODO */
+   LLVMValueRef output_addr = LLVMConstInt(ctx->fsa.i64, addr, 0);
+   LLVMValueRef output_ptr =
+      fsa_get_pointer_val(&ctx->fsa, elem_type, output_addr);
+   LLVMBuildStore(ctx->fsa.builder, src, output_ptr);
+}
 
-   for (unsigned chan = 0; chan < 8; chan++) {
-      if (!(writemask & (1 << chan)))
-         continue;
-      LLVMValueRef value = fsa_llvm_extract_elem(&ctx->fsa, src, chan);
-      /* Fake output address, TODO */
-      LLVMValueRef output_addr =
-         LLVMConstInt(ctx->fsa.i64, 12345600 + chan * 8, 0);
-      LLVMValueRef output_ptr =
-         fsa_get_pointer_val(&ctx->fsa, elem_type, output_addr);
-      LLVMBuildStore(ctx->fsa.builder, value, output_ptr);
+/*
+   1. Get layout (base + stride)
+   2. Get global id
+   3. base + id * stride
+   4. Load val
+*/
+static void
+visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
+                               nir_intrinsic_instr *instr)
+{
+   /* fsa only deals with scalar io */
+   /* store_output val=src[0] no def */
+   assert(instr->src[0].ssa->num_components == 1);
+   /* Calculate offset into gfx_state based on slot */
+   fsa_gfx_state_member member;
+   unsigned idx = 0;
+   nir_io_semantics ios = nir_intrinsic_io_semantics(instr);
+   if (ctx->stage == MESA_SHADER_VERTEX) {
+      gl_varying_slot slot = (gl_varying_slot)ios.location;
+      if (slot == VARYING_SLOT_POS) {
+         member = fsa_vary_slot_pos;
+      } else if (slot >= VARYING_SLOT_TEX0 && slot <= VARYING_SLOT_TEX7) {
+         member = fsa_vary_slot_tex;
+      } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
+         member = fsa_vary_slot_var;
+         idx = slot - VARYING_SLOT_VAR0;
+      } else {
+         printf("Unsupported VS output slot\n");
+         exit(-1);
+      }
+   } else {
+      /* Write to color, depth and stencil must be stored in special register
+       * ready to commit at and of FS. Writing to other output slots will be
+       * lowered to memory load/store */
+      gl_frag_result res = (gl_frag_result)ios.location;
+      if (res >= FRAG_RESULT_DATA0 && res <= FRAG_RESULT_DATA7) {
+         member = fsa_frag_result;
+         idx = res - FRAG_RESULT_DATA0;
+      } else {
+         printf("Unsupported FS output slot\n");
+         exit(-1);
+      }
    }
+   /* Addr calc is the same as load */
+   LLVMValueRef base = fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx);
+   LLVMValueRef stride =
+      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx);
+   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa);
+   LLVMValueRef addr_val = LLVMBuildAdd(
+      ctx->fsa.builder, LLVMBuildMul(ctx->fsa.builder, stride, global_id, ""),
+      base, "");
+   int component = nir_intrinsic_component(instr);
+   unsigned bit_size =
+      fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(get_src(ctx, instr->src[0])));
+   assert("Only supports float now" && bit_size == 32);
+   LLVMValueRef addr_offset =
+      LLVMConstInt(ctx->fsa.i64, component * bit_size / 8, false);
+   addr_val = LLVMBuildAdd(ctx->fsa.builder, addr_val, addr_offset, "");
+
+   /* TODO: Handle different data type */
+   LLVMValueRef src = fsa_to_float(&ctx->fsa, get_src(ctx, instr->src[0]));
+   LLVMTypeRef elem_type = LLVMTypeOf(src);
+   LLVMValueRef output_ptr =
+      fsa_get_pointer_val(&ctx->fsa, elem_type, addr_val);
+   LLVMBuildStore(ctx->fsa.builder, src, output_ptr);
 }
 
 static bool
@@ -1151,10 +1283,16 @@ visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
    LLVMValueRef result = NULL;
    switch (instr->intrinsic) {
    case nir_intrinsic_load_input:
-      result = visit_load(ctx, instr);
+      if (ctx->fsa.is_cpu)
+         result = visit_load_input_cpu(ctx, instr);
+      else
+         result = visit_load_input_gpu_trivial(ctx, instr);
       break;
    case nir_intrinsic_store_output:
-      visit_store_output(ctx, instr);
+      if (ctx->fsa.is_cpu)
+         visit_store_output_cpu(ctx, instr);
+      else
+         visit_store_output_gpu_trivial(ctx, instr);
       break;
    default:
       printf("[V_INTRINISC] Type: %d not implemented,Instr: ",
@@ -1180,9 +1318,96 @@ visit_load_const(struct fsa_nir_context *ctx, const nir_load_const_instr *instr)
       nir_const_value_as_uint(instr->value[0], instr->def.bit_size), false);
 }
 
+static void
+visit_phi(struct fsa_nir_context *ctx, nir_phi_instr *instr)
+{
+   LLVMTypeRef type = get_def_type(ctx, &instr->def);
+   LLVMValueRef result = LLVMBuildPhi(ctx->fsa.builder, type, "");
+
+   ctx->ssa_defs[instr->def.index] = result;
+   _mesa_hash_table_insert(ctx->phis, instr, result);
+}
+
+static LLVMBasicBlockRef
+get_block(struct fsa_nir_context *nir, const struct nir_block *b)
+{
+   struct hash_entry *entry = _mesa_hash_table_search(nir->defs, b);
+   return (LLVMBasicBlockRef)entry->data;
+}
+
+static void
+visit_post_phi(struct fsa_nir_context *ctx, nir_phi_instr *instr,
+               LLVMValueRef llvm_phi)
+{
+   nir_foreach_phi_src (src, instr) {
+      LLVMBasicBlockRef block = get_block(ctx, src->pred);
+      LLVMValueRef llvm_src = get_src(ctx, src->src);
+
+      LLVMAddIncoming(llvm_phi, &llvm_src, &block, 1);
+   }
+}
+
+static void
+phi_post_pass(struct fsa_nir_context *ctx)
+{
+   hash_table_foreach (ctx->phis, entry) {
+      visit_post_phi(ctx, (nir_phi_instr *)entry->key,
+                     (LLVMValueRef)entry->data);
+   }
+}
+
+static bool
+visit_jump(struct fsa_llvm_context *ctx, const nir_jump_instr *instr)
+{
+   switch (instr->type) {
+   case nir_jump_break:
+      fsa_build_break(ctx);
+      break;
+   case nir_jump_continue:
+      fsa_build_continue(ctx);
+      break;
+   default:
+      fprintf(stderr, "Unknown NIR jump instr: ");
+      nir_print_instr(&instr->instr, stderr);
+      fprintf(stderr, "\n");
+      return false;
+   }
+   return true;
+}
+
+static void
+visit_ssa_undef(struct fsa_nir_context *ctx, const nir_undef_instr *instr)
+{
+   unsigned num_components = instr->def.num_components;
+   LLVMTypeRef type =
+      LLVMIntTypeInContext(ctx->fsa.context, instr->def.bit_size);
+
+   LLVMValueRef undef;
+
+   if (num_components == 1)
+      undef = LLVMGetUndef(type);
+   else {
+      undef = LLVMGetUndef(LLVMVectorType(type, num_components));
+   }
+   ctx->ssa_defs[instr->def.index] = undef;
+}
+
 static bool
 visit_block(struct fsa_nir_context *ctx, nir_block *block)
 {
+   LLVMBasicBlockRef blockref = LLVMGetInsertBlock(ctx->fsa.builder);
+   LLVMValueRef first = LLVMGetFirstInstruction(blockref);
+   if (first) {
+      /* LLVM phi nodes must be grouped together and placed at the beginning of
+       * each block */
+      LLVMPositionBuilderBefore(ctx->fsa.builder,
+                                LLVMGetFirstInstruction(blockref));
+   }
+
+   nir_foreach_phi (phi, block) {
+      visit_phi(ctx, phi);
+   }
+
    nir_foreach_instr (instr, block) {
       switch (instr->type) {
       case nir_instr_type_alu:
@@ -1193,7 +1418,17 @@ visit_block(struct fsa_nir_context *ctx, nir_block *block)
          visit_load_const(ctx, nir_instr_as_load_const(instr));
          break;
       case nir_instr_type_intrinsic:
-         visit_intrinsic(ctx, nir_instr_as_intrinsic(instr));
+         if (!visit_intrinsic(ctx, nir_instr_as_intrinsic(instr)))
+            return false;
+         break;
+      case nir_instr_type_phi:
+         break;
+      case nir_instr_type_undef:
+         visit_ssa_undef(ctx, nir_instr_as_undef(instr));
+         break;
+      case nir_instr_type_jump:
+         if (!visit_jump(&ctx->fsa, nir_instr_as_jump(instr)))
+            return false;
          break;
       default:
          printf("[V_BLOCK] Type: %d not implemented,Instr: ", instr->type);
@@ -1202,7 +1437,51 @@ visit_block(struct fsa_nir_context *ctx, nir_block *block)
          exit(-1);
       }
    }
-   LLVMGetInsertBlock(ctx->fsa.builder);
+
+   /* Store nir_block to LLVMBlockRef mapping for phi node post pass reference */
+   _mesa_hash_table_insert(ctx->defs, block,
+                           LLVMGetInsertBlock(ctx->fsa.builder));
+   return true;
+}
+
+static bool visit_cf_list(struct fsa_nir_context *ctx, struct exec_list *list);
+/* nir_if is also a node. recursively visit the then/else statements */
+static bool
+visit_if(struct fsa_nir_context *ctx, nir_if *if_stmt)
+{
+   LLVMValueRef value = get_src(ctx, if_stmt->condition);
+   nir_block *then_block = (nir_block *)exec_list_get_head(&if_stmt->then_list);
+   fsa_build_ifcc(&ctx->fsa, value, then_block->index);
+
+   /* recursively visit */
+   if (!visit_cf_list(ctx, &if_stmt->then_list))
+      return false;
+
+   if (!exec_list_is_empty(&if_stmt->else_list)) {
+      nir_block *else_block =
+         (nir_block *)exec_list_get_head(&if_stmt->else_list);
+
+      fsa_build_else(&ctx->fsa, else_block->index);
+      if (!visit_cf_list(ctx, &if_stmt->else_list))
+         return false;
+   }
+
+   fsa_build_endif(&ctx->fsa, then_block->index);
+   return true;
+}
+
+static bool
+visit_loop(struct fsa_nir_context *ctx, nir_loop *loop)
+{
+   assert(!nir_loop_has_continue_construct(loop));
+   nir_block *first_loop_block = (nir_block *)exec_list_get_head(&loop->body);
+
+   fsa_build_bgnloop(&ctx->fsa, first_loop_block->index);
+
+   if (!visit_cf_list(ctx, &loop->body))
+      return false;
+
+   fsa_build_endloop(&ctx->fsa, first_loop_block->index);
    return true;
 }
 
@@ -1217,7 +1496,15 @@ visit_cf_list(struct fsa_nir_context *ctx, struct exec_list *list)
          }
          break;
       case nir_cf_node_if:
+         if (!visit_if(ctx, nir_cf_node_as_if(node))) {
+            return false;
+         }
+         break;
       case nir_cf_node_loop:
+         if (!visit_loop(ctx, nir_cf_node_as_loop(node))) {
+            return false;
+         }
+         break;
       case nir_cf_node_function:
       default:
          printf("[V_CF_LIST] Type %d not implemented\n", node->type);
@@ -1335,6 +1622,7 @@ bool
 fsa_nir_translate(struct fsa_llvm_context *fsa, struct nir_shader *nir)
 {
    struct fsa_nir_context ctx = {0};
+   bool ret = true;
    ctx.fsa = *fsa;
    ctx.stage = nir->info.stage;
    ctx.info = &nir->info;
@@ -1343,21 +1631,25 @@ fsa_nir_translate(struct fsa_llvm_context *fsa, struct nir_shader *nir)
 
    /* Create LLVM function for each nir function */
    nir_foreach_function (func, nir) {
+      if (!ret)
+         break;
       create_llvm_function(&ctx, func);
-      ctx.ssa_defs =
-         realloc(ctx.ssa_defs, sizeof(LLVMValueRef) * func->impl->ssa_alloc);
-   }
+      nir_index_ssa_defs(func->impl);
+      ctx.ssa_defs = calloc(func->impl->ssa_alloc, sizeof(LLVMValueRef));
 
-   /* Start lowering function body */
-   nir_foreach_function (func, nir) {
+      /* Start lowering function body */
       ctx.defs = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
                                          _mesa_key_pointer_equal);
-      if (!visit_function(&ctx, func)) {
-         return false;
+      ctx.phis = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
+                                         _mesa_key_pointer_equal);
+      if ((ret = visit_function(&ctx, func))) {
+         phi_post_pass(&ctx);
       }
-      _mesa_hash_table_destroy(ctx.defs, NULL);
+      ralloc_free(ctx.defs);
+      ralloc_free(ctx.phis);
+      free(ctx.ssa_defs);
    }
 
    _mesa_hash_table_destroy(ctx.func_map, NULL);
-   return true;
+   return ret;
 }

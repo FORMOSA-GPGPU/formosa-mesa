@@ -203,6 +203,7 @@ with_gallium_lima = gallium_drivers.contains('lima')
 with_gallium_zink = gallium_drivers.contains('zink')
 with_gallium_d3d12 = gallium_drivers.contains('d3d12')
 with_gallium_asahi = gallium_drivers.contains('asahi')
+with_gallium_formosa = gallium_drivers.contains('formosa')
 foreach gallium_driver : gallium_drivers
   pre_args += '-DHAVE_@0@'.format(gallium_driver.to_upper())
 endforeach
@@ -1731,7 +1732,20 @@ if dep_libudev.found()
   pre_args += '-DHAVE_LIBUDEV'
 endif
 
-llvm_modules = ['bitwriter', 'engine', 'mcdisassembler', 'mcjit', 'core', 'executionengine', 'scalaropts', 'transformutils', 'instcombine', 'selectiondag']
+llvm_modules = [
+  'bitwriter',
+  'engine',
+  'mcdisassembler',
+  'mcjit',
+  'core',
+  'executionengine',
+  'scalaropts',
+  'transformutils',
+  'instcombine',
+  'selectiondag',
+  'riscv',
+  'x86',
+]
 llvm_optional_modules = ['coroutines']
 if with_amd_vk or with_gallium_radeonsi or with_gallium_r600
   llvm_modules += ['amdgpu', 'bitreader', 'ipo']
@@ -1795,7 +1809,7 @@ if _llvm.allowed()
     optional_modules : llvm_optional_modules,
     required : (
       with_amd_vk or with_gallium_radeonsi or with_gallium_clover or with_clc
-      or _llvm.enabled()
+      or _llvm.enabled() or with_gallium_formosa
     ),
     static : not _shared_llvm,
     fallback : ['llvm', 'dep_llvm'],

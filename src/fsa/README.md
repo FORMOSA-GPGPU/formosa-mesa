@@ -4,16 +4,18 @@
 - mesa requirements
 - ncurses
 - formosa-llvm
+- spike deps
 
 ## Build
 ```shell
 # Mesa requires at least a gallium driver for x11 platform, therefore we have to configure at least one.
 # native-file specifies the path to `llvm-config`
+# llvm must support X86 backend (used by native JIT)
 $ meson setup build --prefix=$(pwd)/build/install \
-	--libdir=$(pwd)/builddir/install/lib \
+	--libdir=$(pwd)/build/install/lib \
 	--buildtype=debug \
 	-Dplatforms=x11 \
-	-Dgallium-drivers=softpipe \
+	-Dgallium-drivers="softpipe,formosa" \
 	-Dvulkan-drivers=[] \
 	-Dglvnd=disabled \
 	-Dc_cpp_args="-ggdb3" \

@@ -1,10 +1,13 @@
 #include "fsa_compiler.h"
 #include "compiler/glsl/standalone.h"
 #include "compiler/nir/nir.h"
+#include "main/mtypes.h"
 #include "main/shader_types.h"
 #include <llvm-c/Analysis.h>
 #include "fsa_llvm_build.h"
+#include "fsa_llvm_verify.h"
 #include "fsa_nir_to_llvm.h"
+#include "fsa_util.h"
 
 /** @file fsa_compiler.cc
  *
@@ -67,59 +70,47 @@ fsa_print_linked_prog_nir(struct gl_shader_program *whole_prog,
    fsa_print_nir_info(frag_prog->nir);
 }
 
-static int
-llvm_verify_and_report(LLVMModuleRef module)
-{
-   char *error = NULL;
-
-   if (LLVMVerifyModule(module, LLVMReturnStatusAction, &error)) {
-      fprintf(stderr, "LLVM Module verification failed:\n%s\n", error);
-      LLVMDisposeMessage(error);
-      LLVMDumpModule(module);
-      return -1;
-   }
-   return 0;
-}
-
-int
-fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp)
+LLVMModuleRef
+fsa_nir_to_llvm(nir_shader *shader, FILE *fp, int is_cpu)
 {
    if (fp)
       nir_print_shader(shader, fp);
    struct fsa_llvm_context tmp;
    fsa_llvm_context_init(&tmp);
+   tmp.is_cpu = is_cpu;
    if (!fsa_nir_translate(&tmp, shader))
-      return -1;
+      return NULL;
    /* Insert a temp ret to pass verification */
    LLVMBuildRetVoid(tmp.builder);
 
    /* Dump */
-   if (llvm_verify_and_report(tmp.module)) {
-      return -1;
+   fsa_print_llvm_module(tmp.module, fp);
+   if (fsa_llvm_verify_module(tmp.module)) {
+      return NULL;
    }
-   if (!fp)
-      return 0;
-   char *ir_str = LLVMPrintModuleToString(tmp.module);
-   fprintf(fp,
-           "###### DUMPING LLVM IR ######\n%s\n###########################\n",
-           ir_str);
-   LLVMDisposeMessage(ir_str);
-   return 0;
+   // if (fsa_llvm_verify_optimize_module(tmp.module)) {
+   //    return NULL;
+   // }
+   fsa_print_llvm_module(tmp.module, fp);
+   return tmp.module;
 }
 
-void
-fsa_compiler_operation(struct gl_shader_program *whole_prog,
-                       const struct fsa_options *options)
+int
+cmd_compile(int argc, const char **argv)
 {
-   struct gl_program *vert_prog =
-      whole_prog->_LinkedShaders[MESA_SHADER_VERTEX]->Program;
-   struct gl_program *frag_prog =
-      whole_prog->_LinkedShaders[MESA_SHADER_FRAGMENT]->Program;
-
-   nir_lower_load_const_to_scalar(vert_prog->nir);
-   nir_lower_alu_to_scalar(vert_prog->nir, NULL, NULL);
-
-   if (options->dump_nir) {
-      fsa_print_linked_prog_nir(whole_prog, options);
+   struct gl_context ctx = {0};
+   struct fsa_options options = {0};
+   options.base_option.do_link = 1;
+   options.base_option.glsl_version = 300;
+   options.dump_nir = 1;
+   if (argc < 3) {
+      printf("Specify vert and frag files\n");
+      return -1;
    }
+   struct gl_shader_program *whole_program =
+      fsa_compile_shader(&options, 2, (char *const *)&argv[1], &ctx);
+
+   fsa_print_linked_prog_nir(whole_program, &options);
+   fsa_compiler_cleanup(whole_program);
+   return 0;
 }
