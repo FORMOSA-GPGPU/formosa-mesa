@@ -158,4 +158,6 @@ endif
 
 subdir('tool')
 
-subdir('fsa')
+if with_gallium_formosa
+  subdir('fsa')
+endif

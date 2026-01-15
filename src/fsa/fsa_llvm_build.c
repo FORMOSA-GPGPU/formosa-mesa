@@ -20,6 +20,8 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
    /* amd set something else like target triple and data layout in a
     * `ac_create_module` */
    ctx->module = LLVMModuleCreateWithNameInContext("mesa-shader", ctx->context);
+   const char *data_layout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128";
+   LLVMSetDataLayout(ctx->module, data_layout);
    /* amd set some floating point flags in `ac_create_builder` */
    ctx->builder = LLVMCreateBuilderInContext(ctx->context);
 
@@ -60,6 +62,61 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
 
    ctx->i1false = LLVMConstInt(ctx->i1, 0, false);
    ctx->i1true = LLVMConstInt(ctx->i1, 1, false);
+
+   ctx->ptrt = LLVMPointerTypeInContext(ctx->context, 0);
+   /* gpu struct types */
+   /*
+   struct GfxLayout {
+      float* base;
+      uint64_t stride;
+   };
+   */
+   ctx->gfx_layout_t = LLVMStructCreateNamed(ctx->context, "gfx.layout");
+   LLVMTypeRef layout_layout[] = {
+      ctx->ptrt,
+      ctx->i64,
+   };
+   LLVMStructSetBody(ctx->gfx_layout_t, layout_layout, 2, 0);
+
+   /*
+   struct GfxState {
+      // Vertex shader input
+      struct GfxLayout vert_attrib_generic[16];
+      // Vertex shader output, Fragment shader input
+      struct GfxLayout varying_slot_pos[1];
+      struct GfxLayout varying_slot_tex[8];
+      struct GfxLayout varying_slot_var[32];
+      struct GfxLayout frag_result_data[8];
+      // Visibility stream
+      uint64_t* VisS_base;
+   };
+   */
+   ctx->gfx_state_t = LLVMStructCreateNamed(ctx->context, "gfx.state");
+   LLVMTypeRef vert_attrib_arr = LLVMArrayType(ctx->gfx_layout_t, 16);
+   LLVMTypeRef varying_slot_pos_arr = LLVMArrayType(ctx->gfx_layout_t, 1);
+   LLVMTypeRef varying_slot_tex_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
+   LLVMTypeRef varying_slot_var_arr = LLVMArrayType(ctx->gfx_layout_t, 32);
+   LLVMTypeRef frag_result_data_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
+   LLVMTypeRef state_layout[] = {
+      vert_attrib_arr,      varying_slot_pos_arr, varying_slot_tex_arr,
+      varying_slot_var_arr, frag_result_data_arr, ctx->ptrt,
+   };
+   LLVMStructSetBody(ctx->gfx_state_t, state_layout, 6, 0);
+
+   /*
+   struct GfxVSInfo {
+      struct GfxState* gfx_state;
+      uint32_t wg_id;
+      uint32_t wg_size;
+   };
+   */
+   ctx->gfx_info_t = LLVMStructCreateNamed(ctx->context, "gfx.info");
+   LLVMTypeRef info_layout[] = {
+      ctx->ptrt,
+      ctx->i32,
+      ctx->i32,
+   };
+   LLVMStructSetBody(ctx->gfx_info_t, info_layout, 3, 0);
 
    /* `calloc` init mem to zero */
    ctx->flow = calloc(1, sizeof(*ctx->flow));
@@ -1679,4 +1736,107 @@ fsa_build_continue(struct fsa_llvm_context *ctx)
 {
    struct fsa_llvm_flow *flow = get_innermost_loop(ctx);
    LLVMBuildBr(ctx->builder, flow->loop_entry_block);
+}
+
+LLVMValueRef
+fsa_build_info_ptr(struct fsa_llvm_context *ctx)
+{
+   LLVMValueRef info_ptr_val = fsa_build_csr_read(ctx, "mscratch");
+   return LLVMBuildIntToPtr(ctx->builder, info_ptr_val, ctx->ptrt, "info_ptr");
+}
+
+LLVMValueRef
+fsa_build_get_gfx_info_member_ptr(struct fsa_llvm_context *ctx, int idx)
+{
+   LLVMValueRef ptr = fsa_build_info_ptr(ctx);
+   return LLVMBuildStructGEP2(ctx->builder, ctx->gfx_info_t, ptr, idx,
+                              "info_member_ptr");
+}
+
+LLVMValueRef
+fsa_build_get_gfx_state_layout_ptr(struct fsa_llvm_context *ctx,
+                                   fsa_gfx_state_member member, int idx)
+{
+   LLVMValueRef state_ptr = fsa_build_get_gfx_info_member_ptr(ctx, 0);
+   LLVMValueRef state_ptr_val =
+      LLVMBuildLoad2(ctx->builder, ctx->ptrt, state_ptr, "gfxstate_val");
+   LLVMValueRef member_ptr =
+      LLVMBuildStructGEP2(ctx->builder, ctx->gfx_state_t, state_ptr_val, member,
+                          "gfxstate_member_ptr");
+   LLVMValueRef indices = LLVMConstInt(ctx->i64, idx, 0);
+   return LLVMBuildGEP2(ctx->builder, ctx->gfx_layout_t, member_ptr, &indices,
+                        1, "gfxstate_layout_ptr");
+}
+
+LLVMValueRef
+fsa_build_get_gfx_layout_base(struct fsa_llvm_context *ctx,
+                              fsa_gfx_state_member member, int idx)
+{
+   LLVMValueRef layout_ptr =
+      fsa_build_get_gfx_state_layout_ptr(ctx, member, idx);
+   /* gfx_state member stores array of gfx_layout, the returned ptr points to
+    * the layout, so no additional BuildLoad2 is required to get the base and
+    * stride */
+   LLVMValueRef base_ptr = LLVMBuildStructGEP2(
+      ctx->builder, ctx->gfx_layout_t, layout_ptr, 0, "layout_base_ptr");
+   return LLVMBuildLoad2(ctx->builder, ctx->i64, base_ptr, "layout_base_val");
+}
+
+LLVMValueRef
+fsa_build_get_gfx_layout_stride(struct fsa_llvm_context *ctx,
+                                fsa_gfx_state_member member, int idx)
+{
+   LLVMValueRef layout_ptr =
+      fsa_build_get_gfx_state_layout_ptr(ctx, member, idx);
+   LLVMValueRef stride_ptr = LLVMBuildStructGEP2(
+      ctx->builder, ctx->gfx_layout_t, layout_ptr, 1, "layout_stride_ptr");
+   return LLVMBuildLoad2(ctx->builder, ctx->i64, stride_ptr,
+                         "layout_stride_val");
+}
+
+LLVMValueRef
+fsa_build_csr_read(struct fsa_llvm_context *ctx, const char *csr_name)
+{
+   LLVMTypeRef func_type = LLVMFunctionType(ctx->i64, NULL, 0, 0);
+   char asm_string[64] = {0};
+   snprintf(asm_string, 64, "csrr $0, %s", csr_name);
+   const char *constraint = "=r";
+   LLVMValueRef inline_asm =
+      LLVMGetInlineAsm(func_type, asm_string, strlen(asm_string), constraint,
+                       strlen(constraint), 0, 0, LLVMInlineAsmDialectATT, 0);
+   LLVMValueRef asm_call =
+      LLVMBuildCall2(ctx->builder, func_type, inline_asm, NULL, 0, "");
+   /* Add attributes `memory(none)` to callsite so that llvm knows there is no
+    * memory state change for this asm call during this function */
+   unsigned mem_kind = LLVMGetEnumAttributeKindForName("memory", 6);
+   LLVMAttributeRef mem_attr =
+      LLVMCreateEnumAttribute(ctx->context, mem_kind, 0);
+   LLVMAddCallSiteAttribute(asm_call, LLVMAttributeFunctionIndex, mem_attr);
+   unsigned unwind_kind = LLVMGetEnumAttributeKindForName("nounwind", 8);
+   LLVMAttributeRef unwind_attr =
+      LLVMCreateEnumAttribute(ctx->context, unwind_kind, 0);
+   LLVMAddCallSiteAttribute(asm_call, LLVMAttributeFunctionIndex, unwind_attr);
+   return asm_call;
+}
+
+LLVMValueRef
+fsa_build_local_id(struct fsa_llvm_context *ctx)
+{
+   return fsa_build_csr_read(ctx, "mhartid");
+}
+
+LLVMValueRef
+fsa_build_global_id(struct fsa_llvm_context *ctx)
+{
+   LLVMValueRef wg_id_ptr = fsa_build_get_gfx_info_member_ptr(ctx, 1);
+   LLVMValueRef wg_id = LLVMBuildLoad2(ctx->builder, ctx->i32, wg_id_ptr, "");
+   LLVMValueRef wg_size_ptr = fsa_build_get_gfx_info_member_ptr(ctx, 2);
+   LLVMValueRef wg_size =
+      LLVMBuildLoad2(ctx->builder, ctx->i32, wg_size_ptr, "");
+   wg_id = LLVMBuildZExt(ctx->builder, wg_id, ctx->i64, "");
+   wg_size = LLVMBuildZExt(ctx->builder, wg_size, ctx->i64, "");
+   LLVMValueRef local_id = fsa_build_local_id(ctx);
+   LLVMValueRef id_x_size = LLVMBuildMul(ctx->builder, wg_id, wg_size, "");
+   LLVMValueRef global_id = LLVMBuildAdd(ctx->builder, id_x_size, local_id, "");
+   return global_id;
 }

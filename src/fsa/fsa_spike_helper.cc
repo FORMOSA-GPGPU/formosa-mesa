@@ -1,5 +1,4 @@
 #include "fsa_spike_helper.h"
-#include "riscv/mmu.h"
 #include "riscv/sim.h"
 
 #include <cstdint>

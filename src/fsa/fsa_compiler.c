@@ -71,25 +71,26 @@ fsa_print_linked_prog_nir(struct gl_shader_program *whole_prog,
 }
 
 LLVMModuleRef
-fsa_standalone_nir_to_llvm(nir_shader *shader, FILE *fp)
+fsa_nir_to_llvm(nir_shader *shader, FILE *fp, int is_cpu)
 {
    if (fp)
       nir_print_shader(shader, fp);
    struct fsa_llvm_context tmp;
    fsa_llvm_context_init(&tmp);
+   tmp.is_cpu = is_cpu;
    if (!fsa_nir_translate(&tmp, shader))
       return NULL;
    /* Insert a temp ret to pass verification */
    LLVMBuildRetVoid(tmp.builder);
 
    /* Dump */
+   fsa_print_llvm_module(tmp.module, fp);
    if (fsa_llvm_verify_module(tmp.module)) {
       return NULL;
    }
-   fsa_print_llvm_module(tmp.module, fp);
-   if (fsa_llvm_verify_optimize_module(tmp.module)) {
-      return NULL;
-   }
+   // if (fsa_llvm_verify_optimize_module(tmp.module)) {
+   //    return NULL;
+   // }
    fsa_print_llvm_module(tmp.module, fp);
    return tmp.module;
 }

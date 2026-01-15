@@ -14,7 +14,10 @@ add_library(uscsim STATIC
   gfx/uscsim/execute.cc
   gfx/uscsim/instr.cc
   gfx/uscsim/simt.cc
+  gfx/uscsim/uscsim.cc
   gfx/uscsim/cbind.cc
+  gfx/uscsim/rsp_stub.cc
+  gfx/uscsim/uscsim_mt.cc
 )
 
 set_target_properties(uscsim PROPERTIES

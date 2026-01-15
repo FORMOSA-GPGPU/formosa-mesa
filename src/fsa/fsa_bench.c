@@ -45,7 +45,7 @@ parse_num(const char *str)
 }
 
 static LLVMModuleRef
-fsa_bench_compile_test(FILE *fp, int index)
+fsa_bench_compile_test(FILE *fp, int index, int is_cpu)
 {
    /* We dont deal with pack/unpack ops that produces vectorized insts */
    const nir_shader_compiler_options option = {
@@ -74,7 +74,7 @@ fsa_bench_compile_test(FILE *fp, int index)
    nir_lower_alu_to_scalar(shader, NULL, NULL);
    nir_lower_load_const_to_scalar(shader);
    nir_opt_dce(shader);
-   return fsa_standalone_nir_to_llvm(shader, fp);
+   return fsa_nir_to_llvm(shader, fp, is_cpu);
 }
 
 static int
@@ -95,7 +95,7 @@ bench_compile(int argc, const char **argv)
       return -1;
    }
    int i = parse_num(argv[0]);
-   fsa_bench_compile_test(stdout, i);
+   fsa_bench_compile_test(stdout, i, true);
    return 0;
 }
 
@@ -103,15 +103,20 @@ static int
 bench_run_index(FILE *fp, int i, int backend)
 {
    printf("%s\n", fsa_nir_benchlist[i].name);
-   LLVMModuleRef mod = fsa_bench_compile_test(fp, i);
+   int is_cpu = backend != 2;
+   LLVMModuleRef mod = fsa_bench_compile_test(fp, i, is_cpu);
    if (backend == 0) {
-   return fsa_llvm_verify_host(mod, fsa_nir_benchlist[i].op_type,
-                               fsa_nir_benchlist[i].num_ele,
-                               fsa_nir_benchlist[i].gen_golden);
+      return fsa_llvm_verify_host(mod, fsa_nir_benchlist[i].op_type,
+                                  fsa_nir_benchlist[i].num_ele,
+                                  fsa_nir_benchlist[i].gen_golden);
    } else if (backend == 1) {
       return fsa_llvm_verify_spike(mod, fsa_nir_benchlist[i].op_type,
-                               fsa_nir_benchlist[i].num_ele,
-                               fsa_nir_benchlist[i].gen_golden);
+                                   fsa_nir_benchlist[i].num_ele,
+                                   fsa_nir_benchlist[i].gen_golden);
+   } else if (backend == 2) {
+      return fsa_llvm_verify_uscsim(mod, fsa_nir_benchlist[i].op_type,
+                                    fsa_nir_benchlist[i].num_ele,
+                                    fsa_nir_benchlist[i].gen_golden);
    } else {
       printf("Unsupported backend: %d\n", backend);
    }

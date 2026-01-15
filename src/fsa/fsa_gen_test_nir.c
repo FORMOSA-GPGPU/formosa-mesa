@@ -42,6 +42,20 @@
       PREAMBLE(options)                                                        \
       nir_def *src0 = nir_load_input(&b, COMPS, 32, const_z);                  \
       nir_def *src1 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_intrinsic_instr *load_inst0 =                                        \
+         nir_instr_as_intrinsic(src0->parent_instr);                           \
+      nir_intrinsic_instr *load_inst1 =                                        \
+         nir_instr_as_intrinsic(src1->parent_instr);                           \
+      int slot0 = VERT_ATTRIB_GENERIC0;                                        \
+      int slot1 = VERT_ATTRIB_GENERIC1;                                        \
+      nir_intrinsic_set_base(load_inst0, slot0);                               \
+      nir_intrinsic_set_base(load_inst1, slot1);                               \
+      nir_intrinsic_set_component(load_inst0, 0);                              \
+      nir_intrinsic_set_component(load_inst1, 0);                              \
+      nir_io_semantics sem0 = {.location = slot0, .num_slots = 1};             \
+      nir_io_semantics sem1 = {.location = slot1, .num_slots = 1};             \
+      nir_intrinsic_set_io_semantics(load_inst0, sem0);                        \
+      nir_intrinsic_set_io_semantics(load_inst1, sem1);                        \
       nir_def *res = nir_##SHORT(&b, src0, src1);                              \
       if (res->bit_size == 1) {                                                \
          if (nir_alu_type_get_base_type(TYPE) == nir_type_float) {             \
@@ -60,6 +74,13 @@
    {                                                                           \
       PREAMBLE(options)                                                        \
       nir_def *src0 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_intrinsic_instr *load_inst0 =                                        \
+         nir_instr_as_intrinsic(src0->parent_instr);                           \
+      int slot = VERT_ATTRIB_GENERIC0;                                         \
+      nir_intrinsic_set_base(load_inst0, slot);                                \
+      nir_intrinsic_set_component(load_inst0, 0);                              \
+      nir_io_semantics sem = {.location = slot, .num_slots = 1};               \
+      nir_intrinsic_set_io_semantics(load_inst0, sem);                         \
       nir_def *res = nir_##SHORT(&b, src0);                                    \
       POSTAMBLE(res, MASK, TYPE)                                               \
    }
@@ -73,6 +94,27 @@
       nir_def *src0 = nir_load_input(&b, COMPS, 32, const_z);                  \
       nir_def *src1 = nir_load_input(&b, COMPS, 32, const_z);                  \
       nir_def *src2 = nir_load_input(&b, COMPS, 32, const_z);                  \
+      nir_intrinsic_instr *load_inst0 =                                        \
+         nir_instr_as_intrinsic(src0->parent_instr);                           \
+      nir_intrinsic_instr *load_inst1 =                                        \
+         nir_instr_as_intrinsic(src1->parent_instr);                           \
+      nir_intrinsic_instr *load_inst2 =                                        \
+         nir_instr_as_intrinsic(src2->parent_instr);                           \
+      int slot0 = VERT_ATTRIB_GENERIC0;                                        \
+      int slot1 = VERT_ATTRIB_GENERIC1;                                        \
+      int slot2 = VERT_ATTRIB_GENERIC2;                                        \
+      nir_intrinsic_set_base(load_inst0, slot0);                               \
+      nir_intrinsic_set_base(load_inst1, slot1);                               \
+      nir_intrinsic_set_base(load_inst2, slot2);                               \
+      nir_intrinsic_set_component(load_inst0, 0);                              \
+      nir_intrinsic_set_component(load_inst1, 0);                              \
+      nir_intrinsic_set_component(load_inst2, 0);                              \
+      nir_io_semantics sem0 = {.location = slot0, .num_slots = 1};             \
+      nir_io_semantics sem1 = {.location = slot1, .num_slots = 1};             \
+      nir_io_semantics sem2 = {.location = slot2, .num_slots = 1};             \
+      nir_intrinsic_set_io_semantics(load_inst0, sem0);                        \
+      nir_intrinsic_set_io_semantics(load_inst1, sem1);                        \
+      nir_intrinsic_set_io_semantics(load_inst2, sem2);                        \
       nir_def *res = nir_##SHORT(&b, src0, src1, src2);                        \
       if (res->bit_size == 1) {                                                \
          if (nir_alu_type_get_base_type(TYPE) == nir_type_float) {             \
@@ -223,6 +265,18 @@ gen_if_scalar(const nir_shader_compiler_options *option)
    PREAMBLE(option);
    nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
    nir_def *src1 = nir_load_input(&b, 1, 32, const_z);
+   nir_intrinsic_instr *load_inst0 = nir_instr_as_intrinsic(src0->parent_instr);
+   nir_intrinsic_instr *load_inst1 = nir_instr_as_intrinsic(src1->parent_instr);
+   int slot0 = VERT_ATTRIB_GENERIC0;
+   int slot1 = VERT_ATTRIB_GENERIC1;
+   nir_intrinsic_set_base(load_inst0, slot0);
+   nir_intrinsic_set_base(load_inst1, slot1);
+   nir_intrinsic_set_component(load_inst0, 0);
+   nir_intrinsic_set_component(load_inst1, 0);
+   nir_io_semantics sem0 = {.location = slot0, .num_slots = 1};
+   nir_io_semantics sem1 = {.location = slot1, .num_slots = 1};
+   nir_intrinsic_set_io_semantics(load_inst0, sem0);
+   nir_intrinsic_set_io_semantics(load_inst1, sem1);
    nir_def *cond = nir_ilt(&b, src0, src1);
    nir_if *nif = nir_push_if(&b, cond);
    nir_def *res = NULL;
@@ -257,9 +311,9 @@ gen_golden_if_phi(void *dest, void *a, void *b, void *c)
    int32_t *ib = (int32_t *)b;
    int32_t *ic = (int32_t *)c;
    if (*ia < *ib) {
-      *(int32_t*)dest = *ib + *ic;
+      *(int32_t *)dest = *ib + *ic;
    } else {
-      *(int32_t*)dest = *ia + *ib;
+      *(int32_t *)dest = *ia + *ib;
    }
 }
 
@@ -270,6 +324,24 @@ gen_if_phi_scalar(const nir_shader_compiler_options *option)
    nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
    nir_def *src1 = nir_load_input(&b, 1, 32, const_z);
    nir_def *src2 = nir_load_input(&b, 1, 32, const_z);
+   nir_intrinsic_instr *load_inst0 = nir_instr_as_intrinsic(src0->parent_instr);
+   nir_intrinsic_instr *load_inst1 = nir_instr_as_intrinsic(src1->parent_instr);
+   nir_intrinsic_instr *load_inst2 = nir_instr_as_intrinsic(src2->parent_instr);
+   int slot0 = VERT_ATTRIB_GENERIC0;
+   int slot1 = VERT_ATTRIB_GENERIC1;
+   int slot2 = VERT_ATTRIB_GENERIC2;
+   nir_intrinsic_set_base(load_inst0, slot0);
+   nir_intrinsic_set_base(load_inst1, slot1);
+   nir_intrinsic_set_base(load_inst2, slot1);
+   nir_intrinsic_set_component(load_inst0, 0);
+   nir_intrinsic_set_component(load_inst1, 0);
+   nir_intrinsic_set_component(load_inst2, 0);
+   nir_io_semantics sem0 = {.location = slot0, .num_slots = 1};
+   nir_io_semantics sem1 = {.location = slot1, .num_slots = 1};
+   nir_io_semantics sem2 = {.location = slot2, .num_slots = 1};
+   nir_intrinsic_set_io_semantics(load_inst0, sem0);
+   nir_intrinsic_set_io_semantics(load_inst1, sem1);
+   nir_intrinsic_set_io_semantics(load_inst2, sem2);
    nir_def *res0 = NULL, *res1 = NULL;
    nir_block *then_block = NULL, *else_block = NULL;
    nir_if *nif = nir_push_if(&b, nir_ilt(&b, src0, src1));
@@ -303,10 +375,27 @@ gen_if_var_scalar(const nir_shader_compiler_options *option)
 
    nir_variable *res_var =
       nir_local_variable_create(b.impl, glsl_int_type(), "res_var");
-
    nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
    nir_def *src1 = nir_load_input(&b, 1, 32, const_z);
    nir_def *src2 = nir_load_input(&b, 1, 32, const_z);
+   nir_intrinsic_instr *load_inst0 = nir_instr_as_intrinsic(src0->parent_instr);
+   nir_intrinsic_instr *load_inst1 = nir_instr_as_intrinsic(src1->parent_instr);
+   nir_intrinsic_instr *load_inst2 = nir_instr_as_intrinsic(src2->parent_instr);
+   int slot0 = VERT_ATTRIB_GENERIC0;
+   int slot1 = VERT_ATTRIB_GENERIC1;
+   int slot2 = VERT_ATTRIB_GENERIC2;
+   nir_intrinsic_set_base(load_inst0, slot0);
+   nir_intrinsic_set_base(load_inst1, slot1);
+   nir_intrinsic_set_base(load_inst2, slot1);
+   nir_intrinsic_set_component(load_inst0, 0);
+   nir_intrinsic_set_component(load_inst1, 0);
+   nir_intrinsic_set_component(load_inst2, 0);
+   nir_io_semantics sem0 = {.location = slot0, .num_slots = 1};
+   nir_io_semantics sem1 = {.location = slot1, .num_slots = 1};
+   nir_io_semantics sem2 = {.location = slot2, .num_slots = 1};
+   nir_intrinsic_set_io_semantics(load_inst0, sem0);
+   nir_intrinsic_set_io_semantics(load_inst1, sem1);
+   nir_intrinsic_set_io_semantics(load_inst2, sem2);
 
    nir_if *nif = nir_push_if(&b, nir_ilt(&b, src0, src1));
    {
@@ -341,6 +430,13 @@ gen_loop(const nir_shader_compiler_options *option)
 {
    PREAMBLE(option);
    nir_def *src0 = nir_load_input(&b, 1, 32, const_z);
+   nir_intrinsic_instr *load_inst0 = nir_instr_as_intrinsic(src0->parent_instr);
+   int slot0 = VERT_ATTRIB_GENERIC0;
+   nir_intrinsic_set_base(load_inst0, slot0);
+   nir_intrinsic_set_component(load_inst0, 0);
+   nir_io_semantics sem0 = {.location = slot0, .num_slots = 1};
+   nir_intrinsic_set_io_semantics(load_inst0, sem0);
+
    nir_def *init_counter = nir_imm_int(&b, 0);
    nir_def *init_sum = nir_imm_int(&b, 0);
    nir_def *limit = nir_imm_int(&b, 10);
