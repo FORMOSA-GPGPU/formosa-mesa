@@ -84,9 +84,12 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
       struct GfxLayout vert_attrib_generic[16];
       // Vertex shader output, Fragment shader input
       struct GfxLayout varying_slot_pos[1];
+      struct GfxLayout varying_slot_psize[1];
       struct GfxLayout varying_slot_tex[8];
       struct GfxLayout varying_slot_var[32];
       struct GfxLayout frag_result_data[8];
+      float viewport_scale[3];
+      float viewport_offset[3];
       // Visibility stream
       uint64_t* VisS_base;
    };
@@ -94,14 +97,25 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
    ctx->gfx_state_t = LLVMStructCreateNamed(ctx->context, "gfx.state");
    LLVMTypeRef vert_attrib_arr = LLVMArrayType(ctx->gfx_layout_t, 16);
    LLVMTypeRef varying_slot_pos_arr = LLVMArrayType(ctx->gfx_layout_t, 1);
+   LLVMTypeRef varying_slot_psize_arr = LLVMArrayType(ctx->gfx_layout_t, 1);
    LLVMTypeRef varying_slot_tex_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
    LLVMTypeRef varying_slot_var_arr = LLVMArrayType(ctx->gfx_layout_t, 32);
    LLVMTypeRef frag_result_data_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
+   LLVMTypeRef viewport_scale_arr = LLVMArrayType(ctx->f32, 3);
+   LLVMTypeRef viewport_offset_arr = LLVMArrayType(ctx->f32, 3);
    LLVMTypeRef state_layout[] = {
-      vert_attrib_arr,      varying_slot_pos_arr, varying_slot_tex_arr,
-      varying_slot_var_arr, frag_result_data_arr, ctx->ptrt,
+      vert_attrib_arr,
+      varying_slot_pos_arr,
+      varying_slot_psize_arr,
+      varying_slot_tex_arr,
+      varying_slot_var_arr,
+      frag_result_data_arr,
+      ctx->ptrt,
+      viewport_scale_arr,
+      viewport_offset_arr,
    };
-   LLVMStructSetBody(ctx->gfx_state_t, state_layout, 6, 0);
+   LLVMStructSetBody(ctx->gfx_state_t, state_layout,
+                     sizeof(state_layout) / sizeof(LLVMTypeRef), 0);
 
    /*
    struct GfxVSInfo {
@@ -1754,8 +1768,9 @@ fsa_build_get_gfx_info_member_ptr(struct fsa_llvm_context *ctx, int idx)
 }
 
 LLVMValueRef
-fsa_build_get_gfx_state_layout_ptr(struct fsa_llvm_context *ctx,
-                                   fsa_gfx_state_member member, int idx)
+fsa_build_get_gfx_state_member_ptr(struct fsa_llvm_context *ctx,
+                                   fsa_gfx_state_member member,
+                                   LLVMTypeRef type, int idx)
 {
    LLVMValueRef state_ptr = fsa_build_get_gfx_info_member_ptr(ctx, 0);
    LLVMValueRef state_ptr_val =
@@ -1764,8 +1779,8 @@ fsa_build_get_gfx_state_layout_ptr(struct fsa_llvm_context *ctx,
       LLVMBuildStructGEP2(ctx->builder, ctx->gfx_state_t, state_ptr_val, member,
                           "gfxstate_member_ptr");
    LLVMValueRef indices = LLVMConstInt(ctx->i64, idx, 0);
-   return LLVMBuildGEP2(ctx->builder, ctx->gfx_layout_t, member_ptr, &indices,
-                        1, "gfxstate_layout_ptr");
+   return LLVMBuildGEP2(ctx->builder, type, member_ptr, &indices, 1,
+                        "gfxstate_member_idx_ptr");
 }
 
 LLVMValueRef
@@ -1773,7 +1788,7 @@ fsa_build_get_gfx_layout_base(struct fsa_llvm_context *ctx,
                               fsa_gfx_state_member member, int idx)
 {
    LLVMValueRef layout_ptr =
-      fsa_build_get_gfx_state_layout_ptr(ctx, member, idx);
+      fsa_build_get_gfx_state_member_ptr(ctx, member, ctx->gfx_layout_t, idx);
    /* gfx_state member stores array of gfx_layout, the returned ptr points to
     * the layout, so no additional BuildLoad2 is required to get the base and
     * stride */
@@ -1787,11 +1802,31 @@ fsa_build_get_gfx_layout_stride(struct fsa_llvm_context *ctx,
                                 fsa_gfx_state_member member, int idx)
 {
    LLVMValueRef layout_ptr =
-      fsa_build_get_gfx_state_layout_ptr(ctx, member, idx);
+      fsa_build_get_gfx_state_member_ptr(ctx, member, ctx->gfx_layout_t, idx);
    LLVMValueRef stride_ptr = LLVMBuildStructGEP2(
       ctx->builder, ctx->gfx_layout_t, layout_ptr, 1, "layout_stride_ptr");
    return LLVMBuildLoad2(ctx->builder, ctx->i64, stride_ptr,
                          "layout_stride_val");
+}
+
+LLVMValueRef
+fsa_build_get_viewport_scale(struct fsa_llvm_context *ctx, int idx)
+{
+   idx /= 4;
+   assert(idx <= 3);
+   LLVMValueRef scale_ptr = fsa_build_get_gfx_state_member_ptr(
+      ctx, fsa_viewport_scale, ctx->f32, idx);
+   return LLVMBuildLoad2(ctx->builder, ctx->f32, scale_ptr, "viewport_scale");
+}
+
+LLVMValueRef
+fsa_build_get_viewport_offset(struct fsa_llvm_context *ctx, int idx)
+{
+   idx /= 4;
+   assert(idx <= 3);
+   LLVMValueRef offset_ptr = fsa_build_get_gfx_state_member_ptr(
+      ctx, fsa_viewport_offset, ctx->f32, idx);
+   return LLVMBuildLoad2(ctx->builder, ctx->f32, offset_ptr, "viewport_offset");
 }
 
 LLVMValueRef

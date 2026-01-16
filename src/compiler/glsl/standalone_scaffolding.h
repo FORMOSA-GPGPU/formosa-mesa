@@ -107,12 +107,16 @@ _mesa_shader_enum_to_shader_stage(GLenum v)
  * This is used when compiling builtin functions and in testing, when
  * we don't have a connection to an actual driver.
  */
+extern "C"
 void initialize_context_to_defaults(struct gl_context *ctx, gl_api api);
 
+extern "C"
 struct gl_shader_program *
 standalone_create_shader_program(void);
+extern "C"
 void
 standalone_destroy_shader_program(struct gl_shader_program *whole_program);
+extern "C"
 struct gl_shader *
 standalone_add_shader_source(struct gl_context *ctx, struct gl_shader_program *whole_program, GLenum type, const char *source);
 

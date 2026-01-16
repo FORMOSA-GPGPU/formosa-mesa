@@ -6,6 +6,7 @@
 #include "fsa_gen_test_nir.h"
 #include "fsa_llvm_verify.h"
 #include "fsa_ubench_menu.h"
+#include "fsa_util.h"
 
 static int randseed = 0;
 
@@ -74,7 +75,7 @@ fsa_bench_compile_test(FILE *fp, int index, int is_cpu)
    nir_lower_alu_to_scalar(shader, NULL, NULL);
    nir_lower_load_const_to_scalar(shader);
    nir_opt_dce(shader);
-   return fsa_nir_to_llvm(shader, fp, is_cpu);
+   return fsa_nir_to_llvm(shader, is_cpu);
 }
 
 static int
@@ -126,8 +127,8 @@ bench_run_index(FILE *fp, int i, int backend)
 static int
 bench_run_all(FILE *fp, int backend)
 {
-   fsa_llvm_verify_host_init();
-   fsa_llvm_verify_riscv_init();
+   fsa_llvm_host_init();
+   fsa_llvm_riscv_init();
    int count = fsa_bench_count();
    for (int i = 0; i < count; i++) {
       printf("Running test (%d/%d): ", i, count - 1);
@@ -210,8 +211,8 @@ bench_run(int argc, const char **argv)
    if (bench_index < 0) {
       return -1;
    }
-   fsa_llvm_verify_host_init();
-   fsa_llvm_verify_riscv_init();
+   fsa_llvm_host_init();
+   fsa_llvm_riscv_init();
    return bench_run_index(stdout, bench_index, backend);
 }
 

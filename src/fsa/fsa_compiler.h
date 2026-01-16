@@ -19,13 +19,20 @@ struct fsa_options {
 int cmd_compile(int argc, const char **argv);
 struct standalone_options *
 fsa_get_standalone_options(const struct fsa_options *f);
-struct gl_shader_program *fsa_compile_shader(const struct fsa_options *_options,
-                                             unsigned num_files,
-                                             char *const *files,
-                                             struct gl_context *ctx);
+// struct gl_shader_program *fsa_compile_shader(const struct fsa_options
+// *_options,
+//                                              unsigned num_files,
+//                                              char *const *files,
+//                                              struct gl_context *ctx);
+// struct gl_shader_program *fsa_compile_shader(const struct fsa_options
+// *_options,
+//                                              unsigned num_files,
+//                                              char *const *files,
+//                                              struct gl_context *ctx);
 void fsa_compiler_cleanup(struct gl_shader_program *prog);
 
-LLVMModuleRef fsa_nir_to_llvm(nir_shader *shader, FILE *fp, int is_cpu);
+void fsa_compile_nir_opt(nir_shader *shader);
+LLVMModuleRef fsa_nir_to_llvm(nir_shader *shader, int is_cpu);
 
 #ifdef __cplusplus
 }

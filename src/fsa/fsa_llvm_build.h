@@ -223,19 +223,26 @@ LLVMValueRef fsa_build_get_gfx_info_member_ptr(struct fsa_llvm_context *ctx,
 typedef enum {
    fsa_vert_attrib = 0,
    fsa_vary_slot_pos,
+   fsa_vary_slot_psize,
    fsa_vary_slot_tex,
    fsa_vary_slot_var,
    fsa_frag_result,
+   fsa_viewport_scale,
+   fsa_viewport_offset,
 } fsa_gfx_state_member;
 
-LLVMValueRef fsa_build_get_gfx_state_layout_ptr(struct fsa_llvm_context *ctx,
+LLVMValueRef fsa_build_get_gfx_state_member_ptr(struct fsa_llvm_context *ctx,
                                                 fsa_gfx_state_member member,
-                                                int idx);
+                                                LLVMTypeRef type, int idx);
 LLVMValueRef fsa_build_get_gfx_layout_base(struct fsa_llvm_context *ctx,
                                            fsa_gfx_state_member member,
                                            int idx);
 LLVMValueRef fsa_build_get_gfx_layout_stride(struct fsa_llvm_context *ctx,
                                              fsa_gfx_state_member member,
                                              int idx);
+LLVMValueRef fsa_build_get_viewport_scale(struct fsa_llvm_context *ctx,
+                                          int idx);
+LLVMValueRef fsa_build_get_viewport_offset(struct fsa_llvm_context *ctx,
+                                           int idx);
 
 #endif

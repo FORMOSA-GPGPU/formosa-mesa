@@ -22,16 +22,6 @@ struct fsa_nir_context {
    struct hash_table *phis;
 };
 
-void
-fsa_print_llvm_module(LLVMModuleRef module, FILE *fp)
-{
-   if (!fp)
-      return;
-   char *ir_str = LLVMPrintModuleToString(module);
-   fprintf(fp, "###### DUMPING LLVM IR ######\n%s\n", ir_str);
-   LLVMDisposeMessage(ir_str);
-}
-
 static LLVMTypeRef
 get_def_type(struct fsa_nir_context *ctx, const nir_def *def)
 {
@@ -1186,11 +1176,8 @@ visit_store_output_cpu(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
    /* store_output val=src[0] no def */
    assert(instr->src[0].ssa->num_components == 1);
-   unsigned base = nir_intrinsic_base(instr);
    unsigned component = nir_intrinsic_component(instr);
    LLVMValueRef src = fsa_to_float(&ctx->fsa, get_src(ctx, instr->src[0]));
-   ASSERTED unsigned bit_size = fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(src));
-   ASSERTED nir_src offset = *nir_get_io_offset_src(instr);
 
    LLVMTypeRef elem_type = LLVMTypeOf(src);
    /*
@@ -1231,6 +1218,8 @@ visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
       gl_varying_slot slot = (gl_varying_slot)ios.location;
       if (slot == VARYING_SLOT_POS) {
          member = fsa_vary_slot_pos;
+      } else if (slot == VARYING_SLOT_PSIZ) {
+         member = fsa_vary_slot_psize;
       } else if (slot >= VARYING_SLOT_TEX0 && slot <= VARYING_SLOT_TEX7) {
          member = fsa_vary_slot_tex;
       } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
@@ -1277,6 +1266,26 @@ visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
    LLVMBuildStore(ctx->fsa.builder, src, output_ptr);
 }
 
+static LLVMValueRef
+visit_load_ubo(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
+{
+   assert(instr->src[0].ssa->num_components == 1);
+   assert(nir_src_is_const(instr->src[0]));
+   assert(nir_src_is_const(instr->src[1]));
+
+   uint64_t idx = nir_src_as_uint(instr->src[0]);
+   uint64_t offset = nir_src_as_uint(instr->src[1]);
+
+   if (idx == 16) {
+      return fsa_build_get_viewport_scale(&ctx->fsa, offset);
+   } else if (idx == 17) {
+      return fsa_build_get_viewport_offset(&ctx->fsa, offset);
+   }
+   /* No other ubo now */
+   assert(false);
+   return NULL;
+}
+
 static bool
 visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
@@ -1294,6 +1303,10 @@ visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
       else
          visit_store_output_gpu_trivial(ctx, instr);
       break;
+   case nir_intrinsic_load_ubo:
+      result = visit_load_ubo(ctx, instr);
+      break;
+
    default:
       printf("[V_INTRINISC] Type: %d not implemented,Instr: ",
              instr->instr.type);

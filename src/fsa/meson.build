@@ -218,6 +218,8 @@ files_fsa_compiler= files(
   'fsa_lld_helper.cc',
   'fsa_spike_helper.cc',
   'argparse.c',
+  'fsa_lower_viewport_transform.c',
+  'fsa_lower_viewport_to_ubo.c'
 )
 
 dep_ncurses = dependency('ncurses')
