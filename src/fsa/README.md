@@ -5,6 +5,7 @@
 - ncurses
 - formosa-llvm
 - spike deps
+- go (OPTIONAL, for tools)
 
 ## Build
 ```shell
@@ -27,3 +28,7 @@ $ LD_LIBRARY_PATH=$LLVM_LIB_DIR ./build/bin/fsa_compiler
 ```
 ## Thirdparties
 - cofyc/argparse for CLI subcommands
+
+## tools
+Useful development tools will be housed under `tools` dir
+- asm_annotate: Annotates the output RISC-V asm with LLVM IR for better debugging

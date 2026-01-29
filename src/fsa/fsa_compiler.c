@@ -13,11 +13,14 @@
 #include "main/shaderapi.h"
 #include "main/shaderobj.h"
 #include <llvm-c/Analysis.h>
+#include <llvm-c/DebugInfo.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
 #include "argparse.h"
 #include "fsa_llvm_build.h"
 #include "fsa_llvm_verify.h"
+#include "fsa_lower_load_frag_coord_to_scalar.h"
+#include "fsa_lower_to_submit.h"
 #include "fsa_lower_viewport_to_ubo.h"
 #include "fsa_lower_viewport_transform.h"
 #include "fsa_nir_to_llvm.h"
@@ -107,23 +110,52 @@ fsa_read_file(const char *filename)
    return buffer;
 }
 
-static bool
+static int
+type_size_func(const struct glsl_type *type, bool bindless)
+{
+   return glsl_count_attribute_slots(type, false);
+}
+
+bool
 fsa_preprocess_nir(nir_shader *nir)
 {
    bool progress = false;
    /* Move temp global-vars to local */
    NIR_PASS(progress, nir, nir_lower_global_vars_to_local);
    NIR_PASS(progress, nir, nir_lower_var_copies);
+
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS(progress, nir, fsa_nir_lower_to_submit);
+   }
+
+   NIR_PASS(progress, nir, fsa_lower_load_frag_coord_to_scalar);
+
+   int lower_modes = nir_var_shader_in | nir_var_shader_out | nir_var_uniform;
+   NIR_PASS(progress, nir, nir_lower_io, lower_modes, type_size_func,
+            (nir_lower_io_options)0);
+   NIR_PASS(progress, nir, nir_lower_uniforms_to_ubo, false, false);
+
    /* lower_viewport_transform matches `store_deref` so it must run after
-    * lower_var_copies */
+    * lower_var_copies. It must also run after lower_uniforms_to_ubo because it
+    * will shift all ubo indices by one */
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(progress, nir, fsa_lower_viewport_transform);
       NIR_PASS(progress, nir, fsa_lower_viewport_to_ubo);
    }
 
-   NIR_PASS(progress, nir, nir_lower_io_to_scalar, nir_var_mem_ubo, NULL, NULL);
-   /* Clean up constant expressions after lowering */
+   lower_modes = nir_var_shader_in | nir_var_shader_out | nir_var_uniform |
+                 nir_var_mem_ubo;
+   NIR_PASS(progress, nir, nir_lower_io_to_scalar, lower_modes, NULL, NULL);
+   NIR_PASS(progress, nir, nir_lower_alu_to_scalar, NULL, NULL);
+
+   /* Run constant folding before lower_load_const_to_scalar to ensure scalar
+    * load_const */
    NIR_PASS(progress, nir, nir_opt_constant_folding);
+   NIR_PASS(progress, nir, nir_lower_load_const_to_scalar);
+
+   NIR_PASS(progress, nir, nir_lower_pack);
+
+   /* Clean up constant expressions after lowering */
    NIR_PASS(progress, nir, nir_opt_cse);
    NIR_PASS(progress, nir, nir_opt_dce);
    return progress;
@@ -256,28 +288,19 @@ const nir_shader_compiler_options fsa_nir_option = {
    .lower_unpack_32_2x16_split = true,
 };
 
-static int
-type_size_func(const struct glsl_type *type, bool bindless)
-{
-   return glsl_count_attribute_slots(type, false);
-}
-
-void
+bool
 fsa_compile_nir_opt(nir_shader *shader)
 {
-   shader->options = &fsa_nir_option;
    bool progress = false;
-   NIR_PASS(progress, shader, nir_lower_vars_to_ssa);
 
-   int lower_modes = nir_var_shader_in | nir_var_shader_out | nir_var_uniform;
-   NIR_PASS(progress, shader, nir_lower_io, lower_modes, type_size_func,
-            (nir_lower_io_options)0);
-   NIR_PASS(progress, shader, nir_lower_io_to_scalar, lower_modes, NULL, NULL);
-
-   NIR_PASS(progress, shader, nir_lower_alu_to_scalar, NULL, NULL);
-   NIR_PASS(progress, shader, nir_lower_load_const_to_scalar);
-   NIR_PASS(progress, shader, nir_opt_cse);
-   NIR_PASS(progress, shader, nir_opt_dce);
+   do {
+      progress = false;
+      NIR_PASS(progress, shader, nir_opt_algebraic);
+      NIR_PASS(progress, shader, nir_copy_prop);
+      NIR_PASS(progress, shader, nir_opt_cse);
+      NIR_PASS(progress, shader, nir_opt_dce);
+   } while (progress);
+   return progress;
 }
 
 static const char *const compile_usages[] = {
@@ -363,6 +386,7 @@ initialize_context(struct gl_context *ctx)
    ctx->Const.MaxUniformBufferBindings = 16;
    ctx->Const.MaxVertexStreams = 4;
    ctx->Const.MaxTransformFeedbackBuffers = 4;
+   ctx->Const.MaxUserAssignableUniformLocations = 32;
 
    ctx->Const.Program[MESA_SHADER_VERTEX].MaxAttribs = 16;
    ctx->Const.Program[MESA_SHADER_VERTEX].MaxTextureImageUnits = 16;
@@ -421,22 +445,23 @@ cmd_compile(int argc, const char **argv)
       return -1;
    }
 
-   char file_nir[64] = {0};
-   char file_nir_opt[64] = {0};
-   char file_vs_llvm[64] = {0};
-   char file_vs_llvm_opt[64] = {0};
-   char file_fs_llvm[64] = {0};
-   char file_fs_llvm_opt[64] = {0};
-   char file_vs_object[64] = {0};
-   char file_fs_object[64] = {0};
-   snprintf(file_nir, 63, "%s.nir", prefix);
-   snprintf(file_nir_opt, 63, "%s.nir.opt", prefix);
-   snprintf(file_vs_llvm, 63, "%s.vs.ll", prefix);
-   snprintf(file_vs_llvm_opt, 63, "%s.vs.opt.ll", prefix);
-   snprintf(file_fs_llvm, 63, "%s.fs.ll", prefix);
-   snprintf(file_fs_llvm_opt, 63, "%s.fs.opt.ll", prefix);
-   snprintf(file_vs_object, 63, "%s.vs", prefix);
-   snprintf(file_fs_object, 63, "%s.fs", prefix);
+#define NSIZE 512
+   char file_nir[NSIZE] = {0};
+   char file_nir_opt[NSIZE] = {0};
+   char file_vs_llvm[NSIZE] = {0};
+   char file_vs_llvm_opt[NSIZE] = {0};
+   char file_fs_llvm[NSIZE] = {0};
+   char file_fs_llvm_opt[NSIZE] = {0};
+   char file_vs_object[NSIZE] = {0};
+   char file_fs_object[NSIZE] = {0};
+   snprintf(file_nir, NSIZE, "%s.nir", prefix);
+   snprintf(file_nir_opt, NSIZE, "%s.nir.opt", prefix);
+   snprintf(file_vs_llvm, NSIZE, "%s.vs.ll", prefix);
+   snprintf(file_vs_llvm_opt, NSIZE, "%s.vs.opt.ll", prefix);
+   snprintf(file_fs_llvm, NSIZE, "%s.fs.ll", prefix);
+   snprintf(file_fs_llvm_opt, NSIZE, "%s.fs.opt.ll", prefix);
+   snprintf(file_vs_object, NSIZE, "%s.vs", prefix);
+   snprintf(file_fs_object, NSIZE, "%s.fs", prefix);
 
    FILE *fp_nir = fopen(file_nir, "w");
    FILE *fp_nir_opt = fopen(file_nir_opt, "w");
@@ -452,42 +477,52 @@ cmd_compile(int argc, const char **argv)
    }
 
    fsa_print_linked_prog_nir(whole_program, fp_nir);
+   fclose(fp_nir);
    nir_shader *vs =
       whole_program->_LinkedShaders[MESA_SHADER_VERTEX]->Program->nir;
    nir_shader *fs =
       whole_program->_LinkedShaders[MESA_SHADER_FRAGMENT]->Program->nir;
+   vs->options = &fsa_nir_option;
+   fs->options = &fsa_nir_option;
 
    /* Preprocess nir */
+   printf("Preprocess nir\n");
    fsa_preprocess_nir(vs);
    fsa_preprocess_nir(fs);
 
    /* Lowering and opt */
+   printf("Optimize nir\n");
    fsa_compile_nir_opt(vs);
    fsa_compile_nir_opt(fs);
    fsa_print_linked_prog_nir(whole_program, fp_nir_opt);
+   fclose(fp_nir_opt);
 
    /* Compile to llvm ir for each shader */
+   printf("Lower VS to llvm\n");
    LLVMModuleRef vert_module = fsa_nir_to_llvm(vs, false);
-   LLVMModuleRef frag_module = fsa_nir_to_llvm(fs, false);
    fsa_print_llvm_module(vert_module, fp_vs);
+   fclose(fp_vs);
+   printf("Lower FS to llvm\n");
+   LLVMModuleRef frag_module = fsa_nir_to_llvm(fs, false);
    fsa_print_llvm_module(frag_module, fp_fs);
+   fclose(fp_fs);
 
+   printf("Optimize VS LLVM\n");
    fsa_llvm_verify_optimize_module(vert_module, fp_vs_opt);
-   fsa_llvm_verify_optimize_module(frag_module, fp_fs_opt);
    fsa_print_llvm_module(vert_module, fp_vs_opt);
+   fclose(fp_vs_opt);
+   printf("Optimize FS LLVM\n");
+   fsa_llvm_verify_optimize_module(frag_module, fp_fs_opt);
    fsa_print_llvm_module(frag_module, fp_fs_opt);
+   fclose(fp_fs_opt);
 
    /* Compile to riscv asm for each shader */
    fsa_llvm_riscv_init();
+   printf("Assemble VS\n");
    assemble_llvm_module(vert_module, file_vs_object);
+   printf("Assemble FS\n");
    assemble_llvm_module(frag_module, file_fs_object);
 
-   fclose(fp_nir);
-   fclose(fp_nir_opt);
-   fclose(fp_vs);
-   fclose(fp_vs_opt);
-   fclose(fp_fs);
-   fclose(fp_fs_opt);
    fsa_compiler_cleanup(whole_program);
    return 0;
 }

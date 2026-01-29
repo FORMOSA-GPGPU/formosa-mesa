@@ -219,7 +219,9 @@ files_fsa_compiler= files(
   'fsa_spike_helper.cc',
   'argparse.c',
   'fsa_lower_viewport_transform.c',
-  'fsa_lower_viewport_to_ubo.c'
+  'fsa_lower_viewport_to_ubo.c',
+  'fsa_lower_to_submit.c',
+  'fsa_lower_load_frag_coord_to_scalar.c',
 )
 
 dep_ncurses = dependency('ncurses')
@@ -266,3 +268,5 @@ fsa_compiler = executable(
   build_rpath: fsa_rpath,
   install: true
 )
+
+subdir('tools')

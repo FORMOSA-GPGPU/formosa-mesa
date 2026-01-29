@@ -1144,10 +1144,13 @@ visit_load_input_gpu_trivial(struct fsa_nir_context *ctx,
          exit(-1);
       }
    }
-   LLVMValueRef base = fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx);
+   fsa_info_t info_type =
+      ctx->stage == MESA_SHADER_VERTEX ? fsa_vs_info : fsa_fs_info;
+   LLVMValueRef base =
+      fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx, info_type);
    LLVMValueRef stride =
-      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx);
-   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa);
+      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx, info_type);
+   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa, info_type);
    /* ele base address = base + global_id * stride */
    LLVMValueRef addr_val = LLVMBuildAdd(
       ctx->fsa.builder,
@@ -1242,11 +1245,14 @@ visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
          exit(-1);
       }
    }
+   fsa_info_t info_type =
+      ctx->stage == MESA_SHADER_VERTEX ? fsa_vs_info : fsa_fs_info;
    /* Addr calc is the same as load */
-   LLVMValueRef base = fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx);
+   LLVMValueRef base =
+      fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx, info_type);
    LLVMValueRef stride =
-      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx);
-   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa);
+      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx, info_type);
+   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa, info_type);
    LLVMValueRef addr_val = LLVMBuildAdd(
       ctx->fsa.builder, LLVMBuildMul(ctx->fsa.builder, stride, global_id, ""),
       base, "");
@@ -1281,9 +1287,20 @@ visit_load_ubo(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
    } else if (idx == 17) {
       return fsa_build_get_viewport_offset(&ctx->fsa, offset);
    }
-   /* No other ubo now */
-   assert(false);
-   return NULL;
+   fsa_info_t info_type =
+      ctx->stage == MESA_SHADER_VERTEX ? fsa_vs_info : fsa_fs_info;
+   LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
+
+   LLVMValueRef base_ptr = fsa_build_get_gfx_state_arr_member_ptr(
+      &ctx->fsa, fsa_ubo, ctx->fsa.i64, idx, info_type);
+   LLVMValueRef base =
+      LLVMBuildLoad2(ctx->fsa.builder, ctx->fsa.i64, base_ptr, "ubo_base");
+   LLVMValueRef offset_val = LLVMConstInt(ctx->fsa.i64, offset, false);
+   LLVMValueRef addr =
+      LLVMBuildAdd(ctx->fsa.builder, base, offset_val, "ubo_addr");
+   LLVMValueRef ptr =
+      LLVMBuildIntToPtr(ctx->fsa.builder, addr, ctx->fsa.ptrt, "ubo_ptr");
+   return LLVMBuildLoad2(ctx->fsa.builder, dest_type, ptr, "ubo_val");
 }
 
 static bool
@@ -1303,9 +1320,33 @@ visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
       else
          visit_store_output_gpu_trivial(ctx, instr);
       break;
+   case nir_intrinsic_load_uniform:
+      assert("Should be lowered to load_ubo" && 0);
+      break;
    case nir_intrinsic_load_ubo:
       result = visit_load_ubo(ctx, instr);
       break;
+
+   case nir_intrinsic_load_frag_coord_x_fsa:
+      result = fsa_build_load_frag_coord_x(&ctx->fsa);
+      break;
+   case nir_intrinsic_load_frag_coord_y_fsa:
+      result = fsa_build_load_frag_coord_y(&ctx->fsa);
+      break;
+   case nir_intrinsic_load_frag_coord_z_fsa:
+      result = fsa_build_load_frag_coord_z(&ctx->fsa);
+      break;
+   case nir_intrinsic_load_frag_coord_w_fsa:
+      result = fsa_build_load_frag_coord_w(&ctx->fsa);
+      break;
+
+   case nir_intrinsic_submit_pixel_fsa: {
+      LLVMValueRef src[3] = {get_src(ctx, instr->src[0]),
+                             get_src(ctx, instr->src[1]),
+                             get_src(ctx, instr->src[2])};
+      fsa_build_submit_pixel(&ctx->fsa, src);
+      break;
+   }
 
    default:
       printf("[V_INTRINISC] Type: %d not implemented,Instr: ",

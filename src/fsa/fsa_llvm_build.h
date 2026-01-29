@@ -52,7 +52,8 @@ struct fsa_llvm_context {
    LLVMTypeRef v4f32;
 
    LLVMTypeRef ptrt;
-   LLVMTypeRef gfx_info_t;
+   LLVMTypeRef gfx_vs_info_t;
+   LLVMTypeRef gfx_fs_info_t;
    LLVMTypeRef gfx_state_t;
    LLVMTypeRef gfx_layout_t;
 
@@ -214,11 +215,17 @@ void fsa_build_break(struct fsa_llvm_context *ctx);
 void fsa_build_continue(struct fsa_llvm_context *ctx);
 LLVMValueRef fsa_build_csr_read(struct fsa_llvm_context *ctx,
                                 const char *csr_name);
+typedef enum {
+   fsa_vs_info,
+   fsa_fs_info,
+} fsa_info_t;
 LLVMValueRef fsa_build_local_id(struct fsa_llvm_context *ctx);
-LLVMValueRef fsa_build_global_id(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_global_id(struct fsa_llvm_context *ctx,
+                                 fsa_info_t info_type);
+
 LLVMValueRef fsa_build_info_ptr(struct fsa_llvm_context *ctx);
 LLVMValueRef fsa_build_get_gfx_info_member_ptr(struct fsa_llvm_context *ctx,
-                                               int idx);
+                                               int idx, fsa_info_t info_type);
 
 typedef enum {
    fsa_vert_attrib = 0,
@@ -229,20 +236,47 @@ typedef enum {
    fsa_frag_result,
    fsa_viewport_scale,
    fsa_viewport_offset,
+   fsa_ubo,
+   fsa_viss,
 } fsa_gfx_state_member;
+
+typedef enum {
+   fsa_vsinfo_gfx_state,
+   fsa_vsinfo_wg_id,
+   fsa_vsinfo_wg_size,
+} fsa_vsinfo_member;
+
+typedef enum {
+   fsa_fsinfo_gfx_state,
+   fsa_fsinfo_bin_id,
+   fsa_fsinfo_quad_id,
+   fsa_fsinfo_pix_mask,
+   fsa_fsinfo_vert_idx,
+   fsa_fsinfo_bary_coord,
+} fsa_fsinfo_member;
 
 LLVMValueRef fsa_build_get_gfx_state_member_ptr(struct fsa_llvm_context *ctx,
                                                 fsa_gfx_state_member member,
-                                                LLVMTypeRef type, int idx);
+                                                fsa_info_t info_type);
+LLVMValueRef fsa_build_get_gfx_state_arr_member_ptr(
+   struct fsa_llvm_context *ctx, fsa_gfx_state_member member, LLVMTypeRef type,
+   int idx, fsa_info_t info_type);
 LLVMValueRef fsa_build_get_gfx_layout_base(struct fsa_llvm_context *ctx,
-                                           fsa_gfx_state_member member,
-                                           int idx);
+                                           fsa_gfx_state_member member, int idx,
+                                           fsa_info_t info_type);
 LLVMValueRef fsa_build_get_gfx_layout_stride(struct fsa_llvm_context *ctx,
                                              fsa_gfx_state_member member,
-                                             int idx);
+                                             int idx, fsa_info_t info_type);
 LLVMValueRef fsa_build_get_viewport_scale(struct fsa_llvm_context *ctx,
                                           int idx);
 LLVMValueRef fsa_build_get_viewport_offset(struct fsa_llvm_context *ctx,
                                            int idx);
+LLVMValueRef fsa_build_get_uniform(struct fsa_llvm_context *ctx,
+                                   uint64_t offset);
+LLVMValueRef fsa_build_load_frag_coord_x(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_load_frag_coord_y(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_load_frag_coord_z(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_load_frag_coord_w(struct fsa_llvm_context *ctx);
 
+void fsa_build_submit_pixel(struct fsa_llvm_context *ctx, LLVMValueRef *params);
 #endif

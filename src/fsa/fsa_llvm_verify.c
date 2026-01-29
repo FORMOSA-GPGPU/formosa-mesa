@@ -35,7 +35,7 @@ fsa_llvm_verify_optimize_module(LLVMModuleRef module, FILE *fp)
    LLVMPassBuilderOptionsSetVerifyEach(options, 0);
    LLVMPassBuilderOptionsSetDebugLogging(options, 0);
 
-   const char *passes = "default<O3>";
+   const char *passes = "default<O1>";
    LLVMErrorRef error = LLVMRunPasses(module, passes, target_machine, options);
    if (error) {
       char *err_msg = LLVMGetErrorMessage(error);

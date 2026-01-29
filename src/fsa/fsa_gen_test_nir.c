@@ -489,6 +489,12 @@ gen_loop(const nir_shader_compiler_options *option)
    POSTAMBLE(res, 0x1, nir_type_uint32);
 }
 
+static nir_shader *
+gen_load_uniform(const nir_shader_compiler_options *option)
+{
+   return NULL;
+}
+
 static const float32_t f32_zero = {0x00000000};
 static const float32_t f32_one = {0x3f800000};
 static const float32_t f32_neg_one = {0xbf800000};

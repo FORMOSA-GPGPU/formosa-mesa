@@ -2463,3 +2463,14 @@ intrinsic("enqueue_node_payloads", src_comp=[-1])
 
 # Returns true if it has been called for every payload.
 intrinsic("finalize_incoming_node_payload", src_comp=[-1], dest_comp=1)
+
+# Submit pixel for fsa GPU
+# source:
+#  src0: uint32_t packed position
+#  src1: uint32_t color (ARGB)
+#  src2: float depth
+intrinsic("submit_pixel_fsa", src_comp=[1, 1, 1])
+intrinsic("load_frag_coord_x_fsa", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_frag_coord_y_fsa", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_frag_coord_z_fsa", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_frag_coord_w_fsa", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])

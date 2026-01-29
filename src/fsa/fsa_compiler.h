@@ -31,7 +31,8 @@ fsa_get_standalone_options(const struct fsa_options *f);
 //                                              struct gl_context *ctx);
 void fsa_compiler_cleanup(struct gl_shader_program *prog);
 
-void fsa_compile_nir_opt(nir_shader *shader);
+bool fsa_preprocess_nir(nir_shader *nir);
+bool fsa_compile_nir_opt(nir_shader *shader);
 LLVMModuleRef fsa_nir_to_llvm(nir_shader *shader, int is_cpu);
 
 #ifdef __cplusplus
