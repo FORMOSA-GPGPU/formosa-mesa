@@ -279,4 +279,26 @@ LLVMValueRef fsa_build_load_frag_coord_z(struct fsa_llvm_context *ctx);
 LLVMValueRef fsa_build_load_frag_coord_w(struct fsa_llvm_context *ctx);
 
 void fsa_build_submit_pixel(struct fsa_llvm_context *ctx, LLVMValueRef *params);
+
+LLVMValueRef fsa_build_load_barycentric_pixel(struct fsa_llvm_context *ctx);
+LLVMValueRef fsa_build_load_interpolated_input(struct fsa_llvm_context *ctx,
+                                               LLVMValueRef bary,
+                                               LLVMValueRef offset,
+                                               fsa_gfx_state_member member,
+                                               int slot_idx, int component,
+                                               LLVMTypeRef dest_type);
+LLVMValueRef fsa_get_vert_id(struct fsa_llvm_context *ctx, int idx);
+/*
+   vert_attrib_generic[x]
+                       ^
+                    slot idx
+   input_idx: which input into the buffer.
+   For vertex shaders, input_idx is global_idx
+   For fragment shaders, input_idx is the three vert idx
+*/
+LLVMValueRef fsa_build_load_input_gpu(struct fsa_llvm_context *ctx,
+                                      fsa_gfx_state_member member, int slot_idx,
+                                      LLVMValueRef input_idx, int component,
+                                      fsa_info_t info_type,
+                                      LLVMTypeRef dest_type);
 #endif

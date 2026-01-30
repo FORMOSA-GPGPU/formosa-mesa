@@ -2125,3 +2125,114 @@ fsa_build_submit_pixel(struct fsa_llvm_context *ctx, LLVMValueRef *params)
    LLVMBuildBr(ctx->builder, merge_block);
    LLVMPositionBuilderAtEnd(ctx->builder, merge_block);
 }
+
+LLVMValueRef
+fsa_build_load_barycentric_pixel(struct fsa_llvm_context *ctx)
+{
+   LLVMValueRef bary[3] = {0};
+   get_barycentric(ctx, bary);
+
+   LLVMTypeRef v3_t = LLVMVectorType(ctx->f32, 3);
+   LLVMValueRef v3 = LLVMGetUndef(v3_t);
+   for (int i = 0; i < 3; i++) {
+      LLVMValueRef idx = LLVMConstInt(ctx->i32, i, 0);
+      v3 = LLVMBuildInsertElement(ctx->builder, v3, bary[i], idx, "");
+   }
+   return v3;
+}
+
+static unsigned
+get_bit_size(LLVMTypeRef type)
+{
+   switch (LLVMGetTypeKind(type)) {
+   case LLVMIntegerTypeKind:
+      return LLVMGetIntTypeWidth(type);
+   case LLVMFloatTypeKind:
+      return 32;
+   case LLVMHalfTypeKind:
+      return 16;
+   case LLVMDoubleTypeKind:
+      return 64;
+   default:
+      assert("Unsupported type" && 0);
+   }
+}
+
+/*
+   Load flow
+   1. Get layout (base + stride)
+   2. Get global id
+   3. base + id * stride
+   4. Load val
+*/
+LLVMValueRef
+fsa_build_load_input_gpu(struct fsa_llvm_context *ctx,
+                         fsa_gfx_state_member member, int slot_idx,
+                         LLVMValueRef input_idx, int component,
+                         fsa_info_t info_type, LLVMTypeRef dest_type)
+{
+   LLVMValueRef base =
+      fsa_build_get_gfx_layout_base(ctx, member, slot_idx, info_type);
+   LLVMValueRef stride =
+      fsa_build_get_gfx_layout_stride(ctx, member, slot_idx, info_type);
+   /* ele base address = base + global_id * stride */
+   LLVMValueRef addr_val = LLVMBuildAdd(
+      ctx->builder,
+      LLVMBuildMul(ctx->builder, stride, input_idx, "global_id_times_stride"),
+      base, "base_addr");
+   unsigned bit_size = get_bit_size(dest_type);
+   assert("Only supports float now" && bit_size == 32);
+   LLVMValueRef addr_offset =
+      LLVMConstInt(ctx->i64, component * bit_size / 8, false);
+   addr_val = LLVMBuildAdd(ctx->builder, addr_val, addr_offset,
+                           "base_addr_plus_offset");
+   /* Now that we get the addr, load the final scalar value */
+   LLVMTypeRef dest_ptr_type = LLVMPointerType(dest_type, 0);
+   LLVMValueRef ptr = LLVMBuildIntToPtr(ctx->builder, addr_val, dest_ptr_type,
+                                        "load_input_ptr");
+   return LLVMBuildLoad2(ctx->builder, dest_type, ptr, "load_input_val");
+}
+
+LLVMValueRef
+fsa_get_vert_id(struct fsa_llvm_context *ctx, int idx)
+{
+   LLVMValueRef vert_id_arr_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, fsa_fsinfo_vert_idx, fsa_fs_info);
+   LLVMValueRef idx_val = LLVMConstInt(ctx->i64, idx, 0);
+   LLVMValueRef vert_id_ptr = LLVMBuildGEP2(
+      ctx->builder, ctx->i32, vert_id_arr_ptr, &idx_val, 1, "vert_id_ptr");
+   LLVMValueRef vert_id =
+      LLVMBuildLoad2(ctx->builder, ctx->i32, vert_id_ptr, "vert_id");
+   return LLVMBuildZExt(ctx->builder, vert_id, ctx->i64, "");
+}
+
+/* offset not used now */
+LLVMValueRef
+fsa_build_load_interpolated_input(struct fsa_llvm_context *ctx,
+                                  LLVMValueRef bary, LLVMValueRef offset,
+                                  fsa_gfx_state_member member, int slot_idx,
+                                  int component, LLVMTypeRef dest_type)
+{
+   /* bary is a LLVM vec3, extract the value from it and interpolate the input */
+   /* val = b0 * v0 + b1 * v1 + b2 * v2 */
+   /* Load three vertices idx and corresponding inputs */
+   LLVMValueRef vert_id[3], input[3], bary_scalar[3], mul_res[3];
+   for (int i = 0; i < 3; i++) {
+      LLVMValueRef idx = LLVMConstInt(ctx->i32, i, 0);
+      bary_scalar[i] =
+         LLVMBuildExtractElement(ctx->builder, bary, idx, "bary_scalar");
+      vert_id[i] = fsa_get_vert_id(ctx, i);
+      input[i] = fsa_build_load_input_gpu(ctx, member, slot_idx, vert_id[i],
+                                          component, fsa_fs_info, dest_type);
+      /* Hardcoded to f32, not interested to f64 now */
+      input[i] = LLVMBuildBitCast(ctx->builder, input[i], ctx->f32, "");
+      mul_res[i] =
+         LLVMBuildFMul(ctx->builder, input[i], bary_scalar[i], "bary_mul_res");
+   }
+   /* Sum up */
+   LLVMValueRef res = LLVMBuildFAdd(
+      ctx->builder, mul_res[2],
+      LLVMBuildFAdd(ctx->builder, mul_res[0], mul_res[1], "bary_add_mid"),
+      "bary_add_final");
+   return res;
+}
