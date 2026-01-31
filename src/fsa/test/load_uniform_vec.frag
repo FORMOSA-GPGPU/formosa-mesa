@@ -6,11 +6,10 @@
 // Required in ES frag
 precision mediump float;
 
-in vec3 vNormal;
+uniform vec4 uni;
 
-layout(location = 0) out vec4 oColor;
+out vec4 oColor;
 
 void main() {
-  vec3 normal_color = vNormal * 0.5 + 0.5;
-  oColor = vec4(normal_color, 1.0);
+  oColor = uni;
 }

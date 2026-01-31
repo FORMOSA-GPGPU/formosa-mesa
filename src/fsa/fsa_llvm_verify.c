@@ -26,7 +26,7 @@
 #include "fsa_util.h"
 
 int
-fsa_llvm_verify_optimize_module(LLVMModuleRef module)
+fsa_llvm_verify_optimize_module(LLVMModuleRef module, FILE *fp)
 {
    LLVMTargetMachineRef target_machine = NULL;
    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
@@ -39,32 +39,13 @@ fsa_llvm_verify_optimize_module(LLVMModuleRef module)
    LLVMErrorRef error = LLVMRunPasses(module, passes, target_machine, options);
    if (error) {
       char *err_msg = LLVMGetErrorMessage(error);
-      fprintf(stderr, "Optimization failed: %s\n", err_msg);
+      fprintf(fp, "Optimization failed: %s\n", err_msg);
       LLVMDisposeErrorMessage(err_msg);
       return -1;
    }
 
    LLVMDisposePassBuilderOptions(options);
    return 0;
-}
-
-void
-fsa_llvm_verify_host_init()
-{
-   LLVMInitializeNativeTarget();
-   LLVMInitializeNativeAsmPrinter();
-   LLVMInitializeNativeAsmParser();
-   LLVMLinkInMCJIT();
-}
-
-void
-fsa_llvm_verify_riscv_init()
-{
-   LLVMInitializeRISCVTargetInfo();
-   LLVMInitializeRISCVTarget();
-   LLVMInitializeRISCVTargetMC();
-   LLVMInitializeRISCVAsmPrinter();
-   LLVMInitializeRISCVAsmParser();
 }
 
 static LLVMValueRef

@@ -22,16 +22,6 @@ struct fsa_nir_context {
    struct hash_table *phis;
 };
 
-void
-fsa_print_llvm_module(LLVMModuleRef module, FILE *fp)
-{
-   if (!fp)
-      return;
-   char *ir_str = LLVMPrintModuleToString(module);
-   fprintf(fp, "###### DUMPING LLVM IR ######\n%s\n", ir_str);
-   LLVMDisposeMessage(ir_str);
-}
-
 static LLVMTypeRef
 get_def_type(struct fsa_nir_context *ctx, const nir_def *def)
 {
@@ -1123,61 +1113,52 @@ visit_load_input_cpu(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
    4. Load val
 */
 static LLVMValueRef
-visit_load_input_gpu_trivial(struct fsa_nir_context *ctx,
-                             nir_intrinsic_instr *instr)
+visit_load_input_vs(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
    /* fsa only deals with scalar io */
+   assert(instr->def.num_components == 1);
+   /* Calculate offset into gfx_state based on slot */
+   nir_io_semantics ios = nir_intrinsic_io_semantics(instr);
+   gl_vert_attrib attr = (gl_vert_attrib)ios.location;
+   if (attr < VERT_ATTRIB_GENERIC0 || attr > VERT_ATTRIB_GENERIC15) {
+      printf("Invalid vert attrib slot: %d\n", attr);
+      exit(-1);
+   }
+   fsa_gfx_state_member member = fsa_vert_attrib;
+   int idx = attr - VERT_ATTRIB_GENERIC0;
+   LLVMValueRef input_idx = fsa_build_global_id(&ctx->fsa, fsa_vs_info);
+   int component = nir_intrinsic_component(instr);
+   fsa_info_t info_type = fsa_vs_info;
+   LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
+   return fsa_build_load_input_gpu(&ctx->fsa, member, idx, input_idx, component,
+                                   info_type, dest_type);
+}
+
+static LLVMValueRef
+visit_load_input_fs(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
+{
    assert(instr->def.num_components == 1);
    /* Calculate offset into gfx_state based on slot */
    fsa_gfx_state_member member;
    unsigned idx = 0;
    nir_io_semantics ios = nir_intrinsic_io_semantics(instr);
-   if (ctx->stage == MESA_SHADER_VERTEX) {
-      gl_vert_attrib attr = (gl_vert_attrib)ios.location;
-      if (attr < VERT_ATTRIB_GENERIC0 || attr > VERT_ATTRIB_GENERIC15) {
-         printf("Invalid vert attrib slot: %d\n", attr);
-         exit(-1);
-      }
-      member = fsa_vert_attrib;
-      idx = attr - VERT_ATTRIB_GENERIC0;
+   gl_varying_slot slot = (gl_varying_slot)ios.location;
+   if (slot == VARYING_SLOT_POS) {
+      member = fsa_vary_slot_pos;
+   } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
+      member = fsa_vary_slot_var;
+      idx = slot - VARYING_SLOT_VAR0;
    } else {
-      gl_varying_slot slot = (gl_varying_slot)ios.location;
-      if (slot == VARYING_SLOT_POS) {
-         member = fsa_vary_slot_pos;
-      } else if (slot >= VARYING_SLOT_TEX0 && slot <= VARYING_SLOT_TEX7) {
-         member = fsa_vary_slot_tex;
-      } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
-         member = fsa_vary_slot_var;
-         idx = slot - VARYING_SLOT_VAR0;
-      } else {
-         printf("Unsupported FS input slot\n");
-         exit(-1);
-      }
+      printf("Unsupported FS input slot\n");
+      exit(-1);
    }
-   LLVMValueRef base = fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx);
-   LLVMValueRef stride =
-      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx);
-   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa);
-   /* ele base address = base + global_id * stride */
-   LLVMValueRef addr_val = LLVMBuildAdd(
-      ctx->fsa.builder,
-      LLVMBuildMul(ctx->fsa.builder, stride, global_id, "global_id_x_stride"),
-      base, "base_addr");
+   /* Flat input will take the last vertex's value */
+   LLVMValueRef input_idx = fsa_get_vert_id(&ctx->fsa, 2);
    int component = nir_intrinsic_component(instr);
-   unsigned bit_size =
-      fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(get_src(ctx, instr->src[0])));
-   assert("Only supports float now" && bit_size == 32);
-   LLVMValueRef addr_offset =
-      LLVMConstInt(ctx->fsa.i64, component * bit_size / 8, false);
-   addr_val = LLVMBuildAdd(ctx->fsa.builder, addr_val, addr_offset,
-                           "base_addr_plus_offset");
-
-   /* Now that we get the addr, load the final scalar value */
+   fsa_info_t info_type = fsa_fs_info;
    LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
-   LLVMTypeRef dest_ptr_type = LLVMPointerType(dest_type, 0);
-   LLVMValueRef ptr = LLVMBuildIntToPtr(ctx->fsa.builder, addr_val,
-                                        dest_ptr_type, "load_input_ptr");
-   return LLVMBuildLoad2(ctx->fsa.builder, dest_type, ptr, "load_input_val");
+   return fsa_build_load_input_gpu(&ctx->fsa, member, idx, input_idx, component,
+                                   info_type, dest_type);
 }
 
 /* fsa only deals with scalar io */
@@ -1186,11 +1167,8 @@ visit_store_output_cpu(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
    /* store_output val=src[0] no def */
    assert(instr->src[0].ssa->num_components == 1);
-   unsigned base = nir_intrinsic_base(instr);
    unsigned component = nir_intrinsic_component(instr);
    LLVMValueRef src = fsa_to_float(&ctx->fsa, get_src(ctx, instr->src[0]));
-   ASSERTED unsigned bit_size = fsa_get_elem_bits(&ctx->fsa, LLVMTypeOf(src));
-   ASSERTED nir_src offset = *nir_get_io_offset_src(instr);
 
    LLVMTypeRef elem_type = LLVMTypeOf(src);
    /*
@@ -1231,6 +1209,8 @@ visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
       gl_varying_slot slot = (gl_varying_slot)ios.location;
       if (slot == VARYING_SLOT_POS) {
          member = fsa_vary_slot_pos;
+      } else if (slot == VARYING_SLOT_PSIZ) {
+         member = fsa_vary_slot_psize;
       } else if (slot >= VARYING_SLOT_TEX0 && slot <= VARYING_SLOT_TEX7) {
          member = fsa_vary_slot_tex;
       } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
@@ -1253,11 +1233,14 @@ visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
          exit(-1);
       }
    }
+   fsa_info_t info_type =
+      ctx->stage == MESA_SHADER_VERTEX ? fsa_vs_info : fsa_fs_info;
    /* Addr calc is the same as load */
-   LLVMValueRef base = fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx);
+   LLVMValueRef base =
+      fsa_build_get_gfx_layout_base(&ctx->fsa, member, idx, info_type);
    LLVMValueRef stride =
-      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx);
-   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa);
+      fsa_build_get_gfx_layout_stride(&ctx->fsa, member, idx, info_type);
+   LLVMValueRef global_id = fsa_build_global_id(&ctx->fsa, info_type);
    LLVMValueRef addr_val = LLVMBuildAdd(
       ctx->fsa.builder, LLVMBuildMul(ctx->fsa.builder, stride, global_id, ""),
       base, "");
@@ -1277,22 +1260,118 @@ visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
    LLVMBuildStore(ctx->fsa.builder, src, output_ptr);
 }
 
+static LLVMValueRef
+visit_load_interpolated_input(struct fsa_nir_context *ctx,
+                              nir_intrinsic_instr *instr)
+{
+   /* Offset is not supported now  */
+   assert(ctx->stage == MESA_SHADER_FRAGMENT);
+   assert(instr->def.num_components == 1);
+   LLVMValueRef bary = get_src(ctx, instr->src[0]);
+   unsigned idx = 0;
+   fsa_gfx_state_member member;
+   int component = nir_intrinsic_component(instr);
+   nir_io_semantics ios = nir_intrinsic_io_semantics(instr);
+   gl_varying_slot slot = (gl_varying_slot)ios.location;
+   if (slot == VARYING_SLOT_POS) {
+      member = fsa_vary_slot_pos;
+   } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
+      member = fsa_vary_slot_var;
+      idx = slot - VARYING_SLOT_VAR0;
+   } else {
+      printf("Unsupported FS input slot\n");
+      exit(-1);
+   }
+   LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
+   return fsa_build_load_interpolated_input(&ctx->fsa, bary, NULL, member, idx,
+                                            component, dest_type);
+}
+
+static LLVMValueRef
+visit_load_ubo(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
+{
+   assert(instr->src[0].ssa->num_components == 1);
+   assert(nir_src_is_const(instr->src[0]));
+   assert(nir_src_is_const(instr->src[1]));
+
+   uint64_t idx = nir_src_as_uint(instr->src[0]);
+   uint64_t offset = nir_src_as_uint(instr->src[1]);
+
+   if (idx == 16) {
+      return fsa_build_get_viewport_scale(&ctx->fsa, offset);
+   } else if (idx == 17) {
+      return fsa_build_get_viewport_offset(&ctx->fsa, offset);
+   }
+   fsa_info_t info_type =
+      ctx->stage == MESA_SHADER_VERTEX ? fsa_vs_info : fsa_fs_info;
+   LLVMTypeRef dest_type = get_def_type(ctx, &instr->def);
+
+   LLVMValueRef base_ptr = fsa_build_get_gfx_state_arr_member_ptr(
+      &ctx->fsa, fsa_ubo, ctx->fsa.i64, idx, info_type);
+   LLVMValueRef base =
+      LLVMBuildLoad2(ctx->fsa.builder, ctx->fsa.i64, base_ptr, "ubo_base");
+   LLVMValueRef offset_val = LLVMConstInt(ctx->fsa.i64, offset, false);
+   LLVMValueRef addr =
+      LLVMBuildAdd(ctx->fsa.builder, base, offset_val, "ubo_addr");
+   LLVMValueRef ptr =
+      LLVMBuildIntToPtr(ctx->fsa.builder, addr, ctx->fsa.ptrt, "ubo_ptr");
+   return LLVMBuildLoad2(ctx->fsa.builder, dest_type, ptr, "ubo_val");
+}
+
 static bool
 visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
    LLVMValueRef result = NULL;
    switch (instr->intrinsic) {
    case nir_intrinsic_load_input:
-      if (ctx->fsa.is_cpu)
+      if (ctx->fsa.is_cpu) {
          result = visit_load_input_cpu(ctx, instr);
-      else
-         result = visit_load_input_gpu_trivial(ctx, instr);
+      } else if (ctx->stage == MESA_SHADER_VERTEX) {
+         result = visit_load_input_vs(ctx, instr);
+      } else if (ctx->stage == MESA_SHADER_FRAGMENT) {
+         result = visit_load_input_fs(ctx, instr);
+      } else {
+         assert("Unsupported stage" && 0);
+      }
       break;
    case nir_intrinsic_store_output:
       if (ctx->fsa.is_cpu)
          visit_store_output_cpu(ctx, instr);
       else
          visit_store_output_gpu_trivial(ctx, instr);
+      break;
+   case nir_intrinsic_load_uniform:
+      assert("Should be lowered to load_ubo" && 0);
+      break;
+   case nir_intrinsic_load_ubo:
+      result = visit_load_ubo(ctx, instr);
+      break;
+
+   case nir_intrinsic_load_frag_coord_x_fsa:
+      result = fsa_build_load_frag_coord_x(&ctx->fsa);
+      break;
+   case nir_intrinsic_load_frag_coord_y_fsa:
+      result = fsa_build_load_frag_coord_y(&ctx->fsa);
+      break;
+   case nir_intrinsic_load_frag_coord_z_fsa:
+      result = fsa_build_load_frag_coord_z(&ctx->fsa);
+      break;
+   case nir_intrinsic_load_frag_coord_w_fsa:
+      result = fsa_build_load_frag_coord_w(&ctx->fsa);
+      break;
+
+   case nir_intrinsic_submit_pixel_fsa: {
+      LLVMValueRef src[3] = {get_src(ctx, instr->src[0]),
+                             get_src(ctx, instr->src[1]),
+                             get_src(ctx, instr->src[2])};
+      fsa_build_submit_pixel(&ctx->fsa, src);
+      break;
+   }
+   case nir_intrinsic_load_barycentric_pixel:
+      result = fsa_build_load_barycentric_pixel(&ctx->fsa);
+      break;
+   case nir_intrinsic_load_interpolated_input:
+      result = visit_load_interpolated_input(ctx, instr);
       break;
    default:
       printf("[V_INTRINISC] Type: %d not implemented,Instr: ",

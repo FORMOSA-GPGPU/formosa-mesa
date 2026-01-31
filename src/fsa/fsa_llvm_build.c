@@ -84,24 +84,37 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
       struct GfxLayout vert_attrib_generic[16];
       // Vertex shader output, Fragment shader input
       struct GfxLayout varying_slot_pos[1];
+      struct GfxLayout varying_slot_psize[1];
       struct GfxLayout varying_slot_tex[8];
       struct GfxLayout varying_slot_var[32];
       struct GfxLayout frag_result_data[8];
+      float viewport_scale[3];
+      float viewport_offset[3];
+      void *ubo_base[16];
       // Visibility stream
-      uint64_t* VisS_base;
+      void* VisS_base;
    };
    */
    ctx->gfx_state_t = LLVMStructCreateNamed(ctx->context, "gfx.state");
    LLVMTypeRef vert_attrib_arr = LLVMArrayType(ctx->gfx_layout_t, 16);
    LLVMTypeRef varying_slot_pos_arr = LLVMArrayType(ctx->gfx_layout_t, 1);
+   LLVMTypeRef varying_slot_psize_arr = LLVMArrayType(ctx->gfx_layout_t, 1);
    LLVMTypeRef varying_slot_tex_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
    LLVMTypeRef varying_slot_var_arr = LLVMArrayType(ctx->gfx_layout_t, 32);
    LLVMTypeRef frag_result_data_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
+   LLVMTypeRef viewport_scale_arr = LLVMArrayType(ctx->f32, 3);
+   LLVMTypeRef viewport_offset_arr = LLVMArrayType(ctx->f32, 3);
+   /* Support only max 16 ubo */
+   LLVMTypeRef ubo_base_arr = LLVMArrayType(ctx->ptrt, 16);
    LLVMTypeRef state_layout[] = {
-      vert_attrib_arr,      varying_slot_pos_arr, varying_slot_tex_arr,
-      varying_slot_var_arr, frag_result_data_arr, ctx->ptrt,
+      vert_attrib_arr,        varying_slot_pos_arr,
+      varying_slot_psize_arr, varying_slot_tex_arr,
+      varying_slot_var_arr,   frag_result_data_arr,
+      viewport_scale_arr,     viewport_offset_arr,
+      ubo_base_arr,           ctx->ptrt,
    };
-   LLVMStructSetBody(ctx->gfx_state_t, state_layout, 6, 0);
+   LLVMStructSetBody(ctx->gfx_state_t, state_layout,
+                     sizeof(state_layout) / sizeof(LLVMTypeRef), 0);
 
    /*
    struct GfxVSInfo {
@@ -110,13 +123,36 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
       uint32_t wg_size;
    };
    */
-   ctx->gfx_info_t = LLVMStructCreateNamed(ctx->context, "gfx.info");
-   LLVMTypeRef info_layout[] = {
+   ctx->gfx_vs_info_t = LLVMStructCreateNamed(ctx->context, "gfx.vs_info");
+   LLVMTypeRef vs_info_layout[] = {
       ctx->ptrt,
       ctx->i32,
       ctx->i32,
    };
-   LLVMStructSetBody(ctx->gfx_info_t, info_layout, 3, 0);
+   LLVMStructSetBody(ctx->gfx_vs_info_t, vs_info_layout,
+                     sizeof(vs_info_layout) / sizeof(LLVMTypeRef), 0);
+
+   /*
+   struct GfxFSInfo {
+      struct GfxState* gfx_state;
+      uint32_t bin_id;
+      uint32_t quad_id;
+      bool pix_mask[4];
+      ivec3 vert_idx;
+      vec3 bary_coord[4];
+   };
+   */
+   ctx->gfx_fs_info_t = LLVMStructCreateNamed(ctx->context, "gfx.fs_info");
+   LLVMTypeRef fs_pix_mask_arr = LLVMArrayType(ctx->i1, 4);
+   LLVMTypeRef fs_vert_idx_arr = LLVMArrayType(ctx->i32, 3);
+   LLVMTypeRef fs_bary_coord = LLVMArrayType(ctx->f32, 3);
+   LLVMTypeRef fs_bary_coord_arr = LLVMArrayType(fs_bary_coord, 4);
+   LLVMTypeRef fs_info_layout[] = {
+      ctx->ptrt,       ctx->i32,        ctx->i32,
+      fs_pix_mask_arr, fs_vert_idx_arr, fs_bary_coord_arr,
+   };
+   LLVMStructSetBody(ctx->gfx_fs_info_t, fs_info_layout,
+                     sizeof(fs_info_layout) / sizeof(LLVMTypeRef), 0);
 
    /* `calloc` init mem to zero */
    ctx->flow = calloc(1, sizeof(*ctx->flow));
@@ -1746,34 +1782,54 @@ fsa_build_info_ptr(struct fsa_llvm_context *ctx)
 }
 
 LLVMValueRef
-fsa_build_get_gfx_info_member_ptr(struct fsa_llvm_context *ctx, int idx)
+fsa_build_get_gfx_info_member_ptr(struct fsa_llvm_context *ctx, int idx,
+                                  fsa_info_t info_type)
 {
    LLVMValueRef ptr = fsa_build_info_ptr(ctx);
-   return LLVMBuildStructGEP2(ctx->builder, ctx->gfx_info_t, ptr, idx,
-                              "info_member_ptr");
+   if (info_type == fsa_vs_info) {
+      return LLVMBuildStructGEP2(ctx->builder, ctx->gfx_vs_info_t, ptr, idx,
+                                 "info_member_ptr");
+
+   } else if (info_type == fsa_fs_info) {
+      return LLVMBuildStructGEP2(ctx->builder, ctx->gfx_fs_info_t, ptr, idx,
+                                 "info_member_ptr");
+   }
+   assert("Should never go here" && 0);
 }
 
 LLVMValueRef
-fsa_build_get_gfx_state_layout_ptr(struct fsa_llvm_context *ctx,
-                                   fsa_gfx_state_member member, int idx)
+fsa_build_get_gfx_state_member_ptr(struct fsa_llvm_context *ctx,
+                                   fsa_gfx_state_member member,
+                                   fsa_info_t info_type)
 {
-   LLVMValueRef state_ptr = fsa_build_get_gfx_info_member_ptr(ctx, 0);
+   LLVMValueRef state_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, 0, info_type);
    LLVMValueRef state_ptr_val =
       LLVMBuildLoad2(ctx->builder, ctx->ptrt, state_ptr, "gfxstate_val");
-   LLVMValueRef member_ptr =
-      LLVMBuildStructGEP2(ctx->builder, ctx->gfx_state_t, state_ptr_val, member,
-                          "gfxstate_member_ptr");
+   return LLVMBuildStructGEP2(ctx->builder, ctx->gfx_state_t, state_ptr_val,
+                              member, "gfxstate_member_ptr");
+}
+
+LLVMValueRef
+fsa_build_get_gfx_state_arr_member_ptr(struct fsa_llvm_context *ctx,
+                                       fsa_gfx_state_member member,
+                                       LLVMTypeRef type, int idx,
+                                       fsa_info_t info_type)
+{
+   LLVMValueRef state_member_arr_ptr =
+      fsa_build_get_gfx_state_member_ptr(ctx, member, info_type);
    LLVMValueRef indices = LLVMConstInt(ctx->i64, idx, 0);
-   return LLVMBuildGEP2(ctx->builder, ctx->gfx_layout_t, member_ptr, &indices,
-                        1, "gfxstate_layout_ptr");
+   return LLVMBuildGEP2(ctx->builder, type, state_member_arr_ptr, &indices, 1,
+                        "gfxstate_member_idx_ptr");
 }
 
 LLVMValueRef
 fsa_build_get_gfx_layout_base(struct fsa_llvm_context *ctx,
-                              fsa_gfx_state_member member, int idx)
+                              fsa_gfx_state_member member, int idx,
+                              fsa_info_t info_type)
 {
-   LLVMValueRef layout_ptr =
-      fsa_build_get_gfx_state_layout_ptr(ctx, member, idx);
+   LLVMValueRef layout_ptr = fsa_build_get_gfx_state_arr_member_ptr(
+      ctx, member, ctx->gfx_layout_t, idx, info_type);
    /* gfx_state member stores array of gfx_layout, the returned ptr points to
     * the layout, so no additional BuildLoad2 is required to get the base and
     * stride */
@@ -1784,14 +1840,42 @@ fsa_build_get_gfx_layout_base(struct fsa_llvm_context *ctx,
 
 LLVMValueRef
 fsa_build_get_gfx_layout_stride(struct fsa_llvm_context *ctx,
-                                fsa_gfx_state_member member, int idx)
+                                fsa_gfx_state_member member, int idx,
+                                fsa_info_t info_type)
 {
-   LLVMValueRef layout_ptr =
-      fsa_build_get_gfx_state_layout_ptr(ctx, member, idx);
+   LLVMValueRef layout_ptr = fsa_build_get_gfx_state_arr_member_ptr(
+      ctx, member, ctx->gfx_layout_t, idx, info_type);
    LLVMValueRef stride_ptr = LLVMBuildStructGEP2(
       ctx->builder, ctx->gfx_layout_t, layout_ptr, 1, "layout_stride_ptr");
    return LLVMBuildLoad2(ctx->builder, ctx->i64, stride_ptr,
                          "layout_stride_val");
+}
+
+LLVMValueRef
+fsa_build_get_viewport_scale(struct fsa_llvm_context *ctx, int idx)
+{
+   idx /= 4;
+   assert(idx <= 3);
+   LLVMValueRef scale_ptr = fsa_build_get_gfx_state_arr_member_ptr(
+      ctx, fsa_viewport_scale, ctx->f32, idx, fsa_vs_info);
+   return LLVMBuildLoad2(ctx->builder, ctx->f32, scale_ptr, "viewport_scale");
+}
+
+LLVMValueRef
+fsa_build_get_viewport_offset(struct fsa_llvm_context *ctx, int idx)
+{
+   idx /= 4;
+   assert(idx <= 3);
+   LLVMValueRef offset_ptr = fsa_build_get_gfx_state_arr_member_ptr(
+      ctx, fsa_viewport_offset, ctx->f32, idx, fsa_vs_info);
+   return LLVMBuildLoad2(ctx->builder, ctx->f32, offset_ptr, "viewport_offset");
+}
+
+LLVMValueRef
+fsa_build_get_uniform(struct fsa_llvm_context *ctx, uint64_t offset)
+{
+   /* uniform will be lowered to ubo accesses */
+   assert("Uniform will be lowered to ubo accesses " && 0);
 }
 
 LLVMValueRef
@@ -1825,12 +1909,14 @@ fsa_build_local_id(struct fsa_llvm_context *ctx)
    return fsa_build_csr_read(ctx, "mhartid");
 }
 
-LLVMValueRef
-fsa_build_global_id(struct fsa_llvm_context *ctx)
+static LLVMValueRef
+build_vs_global_id(struct fsa_llvm_context *ctx)
 {
-   LLVMValueRef wg_id_ptr = fsa_build_get_gfx_info_member_ptr(ctx, 1);
+   LLVMValueRef wg_id_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, 1, fsa_vs_info);
    LLVMValueRef wg_id = LLVMBuildLoad2(ctx->builder, ctx->i32, wg_id_ptr, "");
-   LLVMValueRef wg_size_ptr = fsa_build_get_gfx_info_member_ptr(ctx, 2);
+   LLVMValueRef wg_size_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, 2, fsa_vs_info);
    LLVMValueRef wg_size =
       LLVMBuildLoad2(ctx->builder, ctx->i32, wg_size_ptr, "");
    wg_id = LLVMBuildZExt(ctx->builder, wg_id, ctx->i64, "");
@@ -1839,4 +1925,314 @@ fsa_build_global_id(struct fsa_llvm_context *ctx)
    LLVMValueRef id_x_size = LLVMBuildMul(ctx->builder, wg_id, wg_size, "");
    LLVMValueRef global_id = LLVMBuildAdd(ctx->builder, id_x_size, local_id, "");
    return global_id;
+}
+
+static LLVMValueRef
+build_fs_global_id(struct fsa_llvm_context *ctx)
+{
+   /* Fragment shader have only one warp per launch, global_id == local_id */
+   return fsa_build_local_id(ctx);
+}
+
+LLVMValueRef
+fsa_build_global_id(struct fsa_llvm_context *ctx, fsa_info_t info_type)
+{
+   if (info_type == fsa_vs_info) {
+      return build_vs_global_id(ctx);
+   } else if (info_type == fsa_fs_info) {
+      return build_fs_global_id(ctx);
+   }
+   assert("Should never go here" && 0);
+}
+
+/*
+   +---+---+
+   | 2 | 3 |
+   +---+---+
+   | 0 | 1 |
+   +---+---+
+   frag coord x = quad_x_base + (tid % 2)
+   frag coord y = quad_y_base + (tid >= 2)
+*/
+LLVMValueRef
+fsa_build_load_frag_coord_x(struct fsa_llvm_context *ctx)
+{
+   /* Get global quad_id */
+   LLVMValueRef quad_id_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, fsa_fsinfo_quad_id, fsa_fs_info);
+   LLVMValueRef quad_id =
+      LLVMBuildLoad2(ctx->builder, ctx->i32, quad_id_ptr, "quad_id");
+   /* Decode screen space position x from quad_id % 320, quad is 2x2 */
+   LLVMValueRef quad_x_num = LLVMConstInt(ctx->i32, 640 / 2, 0);
+   LLVMValueRef quad_x_mod =
+      LLVMBuildURem(ctx->builder, quad_id, quad_x_num, "quad_x_mod");
+   LLVMValueRef quad_x_base = LLVMBuildMul(
+      ctx->builder, quad_x_mod, LLVMConstInt(ctx->i32, 2, 0), "quad_x_base");
+   /* If tid % 2 == 1, add one to x */
+   LLVMValueRef thread_id = LLVMBuildTrunc(
+      ctx->builder, fsa_build_local_id(ctx), ctx->i32, "tid_i32");
+   LLVMValueRef addend = LLVMBuildAnd(
+      ctx->builder, thread_id, LLVMConstInt(ctx->i32, 1, 0), "pos_x_addend");
+   LLVMValueRef pos_x =
+      LLVMBuildAdd(ctx->builder, quad_x_base, addend, "pos_x");
+   return pos_x;
+}
+
+LLVMValueRef
+fsa_build_load_frag_coord_y(struct fsa_llvm_context *ctx)
+{
+   /* Get global quad_id */
+   LLVMValueRef quad_id_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, fsa_fsinfo_quad_id, fsa_fs_info);
+   LLVMValueRef quad_id =
+      LLVMBuildLoad2(ctx->builder, ctx->i32, quad_id_ptr, "quad_id");
+   /* Decode screen space position x from quad_id / 320, quad is 2x2 */
+   LLVMValueRef quad_y_num = LLVMConstInt(ctx->i32, 640 / 2, 0);
+   LLVMValueRef quad_y_div =
+      LLVMBuildUDiv(ctx->builder, quad_id, quad_y_num, "quad_y_div");
+   LLVMValueRef quad_y_base = LLVMBuildMul(
+      ctx->builder, quad_y_div, LLVMConstInt(ctx->i32, 2, 0), "quad_y_base");
+   LLVMValueRef thread_id = LLVMBuildTrunc(
+      ctx->builder, fsa_build_local_id(ctx), ctx->i32, "tid_i32");
+   LLVMValueRef tid_cmp =
+      LLVMBuildICmp(ctx->builder, LLVMIntUGE, thread_id,
+                    LLVMConstInt(ctx->i32, 2, 0), "tid_cmp");
+   LLVMValueRef addend =
+      LLVMBuildZExt(ctx->builder, tid_cmp, ctx->i32, "pos_y_addend");
+   LLVMValueRef pos_y =
+      LLVMBuildAdd(ctx->builder, quad_y_base, addend, "pos_y");
+   return pos_y;
+}
+
+static void
+get_pos(struct fsa_llvm_context *ctx, int component, LLVMValueRef *pos)
+{
+   LLVMValueRef vert_idx_arr_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, fsa_fsinfo_vert_idx, fsa_fs_info);
+   LLVMValueRef vert_idx[3];
+   for (int i = 0; i < 3; i++) {
+      LLVMValueRef idx = LLVMConstInt(ctx->i64, i, 0);
+      LLVMValueRef vert_idx_ptr = LLVMBuildGEP2(
+         ctx->builder, ctx->i32, vert_idx_arr_ptr, &idx, 1, "vert_idx_ptr");
+      vert_idx[i] =
+         LLVMBuildLoad2(ctx->builder, ctx->i32, vert_idx_ptr, "vert_idx_i32");
+      vert_idx[i] =
+         LLVMBuildZExt(ctx->builder, vert_idx[i], ctx->i64, "vert_idx_i64");
+   }
+   /* Calc position address */
+   LLVMValueRef pos_base =
+      fsa_build_get_gfx_layout_base(ctx, fsa_vary_slot_pos, 0, fsa_fs_info);
+   LLVMValueRef pos_stride =
+      fsa_build_get_gfx_layout_stride(ctx, fsa_vary_slot_pos, 0, fsa_fs_info);
+   LLVMValueRef v_addr[3], v_ptr[3], pos_ptr[3];
+   for (int i = 0; i < 3; i++) {
+      v_addr[i] = LLVMBuildAdd(ctx->builder, pos_base,
+                               LLVMBuildMul(ctx->builder, vert_idx[i],
+                                            pos_stride, "vidx_times_stride"),
+                               "v_addr");
+      v_ptr[i] = LLVMBuildIntToPtr(ctx->builder, v_addr[i], ctx->ptrt, "v_ptr");
+      /* component xyzw <-> 0, 1, 2, 3 */
+      LLVMValueRef offset = LLVMConstInt(ctx->i32, component, 0);
+      pos_ptr[i] =
+         LLVMBuildGEP2(ctx->builder, ctx->f32, v_ptr[i], &offset, 1, "pos_ptr");
+      pos[i] = LLVMBuildLoad2(ctx->builder, ctx->f32, pos_ptr[i], "pos");
+   }
+}
+
+static void
+get_barycentric(struct fsa_llvm_context *ctx, LLVMValueRef *b)
+{
+   /* Barycentric coordinate is see as ana 1D array, we calculate the offset into
+    * this array and get the pointer wtih GEP2 then finally load the value */
+   LLVMValueRef bary_base_ptr = fsa_build_get_gfx_info_member_ptr(
+      ctx, fsa_fsinfo_bary_coord, fsa_fs_info);
+   LLVMValueRef tid = fsa_build_local_id(ctx);
+   LLVMValueRef thread_offset = LLVMBuildMul(
+      ctx->builder, tid, LLVMConstInt(ctx->i64, 3, false), "thread_offset");
+   for (int i = 0; i < 3; i++) {
+      /* comp_offset = offset for x, y, z */
+      LLVMValueRef comp_offset = LLVMConstInt(ctx->i64, i, false);
+      LLVMValueRef bary_offset =
+         LLVMBuildAdd(ctx->builder, thread_offset, comp_offset, "bary_offset");
+      LLVMValueRef bary_ptr =
+         LLVMBuildGEP2(ctx->builder, ctx->f32, bary_base_ptr, &bary_offset, 1,
+                       "final_bary_ptr");
+      b[i] = LLVMBuildLoad2(ctx->builder, ctx->f32, bary_ptr, "bary");
+   }
+}
+
+LLVMValueRef
+fsa_build_load_frag_coord_z(struct fsa_llvm_context *ctx)
+{
+   /* Interoplate z = b0 * pos.z0 + b1 * pos.z1 + b2 * pos.z2
+    * b is barycentric coord, pos is gl_Position */
+   LLVMValueRef bary[3], pos[3];
+   get_barycentric(ctx, bary);
+   get_pos(ctx, 2, pos);
+   LLVMValueRef mul[3];
+   for (int i = 0; i < 3; i++) {
+      mul[i] = LLVMBuildFMul(ctx->builder, bary[i], pos[i], "b_times_pos");
+   }
+   return LLVMBuildFAdd(ctx->builder, mul[2],
+                        LLVMBuildFAdd(ctx->builder, mul[0], mul[1], ""), "");
+}
+
+LLVMValueRef
+fsa_build_load_frag_coord_w(struct fsa_llvm_context *ctx)
+{
+   /* Interoplate w = b0 * pos.w0 + b1 * pos.w1 + b2 * pos.w2
+    * b is barycentric coord, pos is gl_Position */
+   LLVMValueRef bary[3], pos[3];
+   get_barycentric(ctx, bary);
+   get_pos(ctx, 3, pos);
+   LLVMValueRef mul[3];
+   for (int i = 0; i < 3; i++) {
+      mul[i] = LLVMBuildFMul(ctx->builder, bary[i], pos[i], "b_times_pos");
+   }
+   return LLVMBuildFAdd(
+      ctx->builder, mul[2],
+      LLVMBuildFAdd(ctx->builder, mul[0], mul[1], "frag_coord_w_add"),
+      "frag_coord_w_final");
+}
+
+void
+fsa_build_submit_pixel(struct fsa_llvm_context *ctx, LLVMValueRef *params)
+{
+   LLVMValueRef tid = fsa_build_local_id(ctx);
+   LLVMValueRef pix_mask_arr_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, fsa_fsinfo_pix_mask, fsa_fs_info);
+   LLVMValueRef pix_mask_ptr = LLVMBuildGEP2(
+      ctx->builder, ctx->i1, pix_mask_arr_ptr, &tid, 1, "pix_mask_ptr");
+   LLVMValueRef pix_mask_val =
+      LLVMBuildLoad2(ctx->builder, ctx->i1, pix_mask_ptr, "pix_mask_val");
+
+   /* pix mask check */
+   LLVMBasicBlockRef curr_block = LLVMGetInsertBlock(ctx->builder);
+   LLVMValueRef func = LLVMGetBasicBlockParent(curr_block);
+   LLVMBasicBlockRef then_block = LLVMAppendBasicBlock(func, "rop_block");
+   LLVMBasicBlockRef merge_block =
+      LLVMAppendBasicBlock(func, "rop_after_block");
+
+   LLVMBuildCondBr(ctx->builder, pix_mask_val, then_block, merge_block);
+   LLVMPositionBuilderAtEnd(ctx->builder, then_block);
+
+   for (int i = 0; i < 3; i++) {
+      /* arg1 depth value is float, bitcast to int and move on */
+      params[i] = LLVMBuildBitCast(ctx->builder, params[i], ctx->i32, "");
+      params[i] = LLVMBuildZExt(ctx->builder, params[i], ctx->i64, "");
+   }
+   fsa_build_intrinsic(ctx, "llvm.riscv.fsa.rop", ctx->voidt, params, 3, 0);
+   LLVMBuildBr(ctx->builder, merge_block);
+   LLVMPositionBuilderAtEnd(ctx->builder, merge_block);
+}
+
+LLVMValueRef
+fsa_build_load_barycentric_pixel(struct fsa_llvm_context *ctx)
+{
+   LLVMValueRef bary[3] = {0};
+   get_barycentric(ctx, bary);
+
+   LLVMTypeRef v3_t = LLVMVectorType(ctx->f32, 3);
+   LLVMValueRef v3 = LLVMGetUndef(v3_t);
+   for (int i = 0; i < 3; i++) {
+      LLVMValueRef idx = LLVMConstInt(ctx->i32, i, 0);
+      v3 = LLVMBuildInsertElement(ctx->builder, v3, bary[i], idx, "");
+   }
+   return v3;
+}
+
+static unsigned
+get_bit_size(LLVMTypeRef type)
+{
+   switch (LLVMGetTypeKind(type)) {
+   case LLVMIntegerTypeKind:
+      return LLVMGetIntTypeWidth(type);
+   case LLVMFloatTypeKind:
+      return 32;
+   case LLVMHalfTypeKind:
+      return 16;
+   case LLVMDoubleTypeKind:
+      return 64;
+   default:
+      assert("Unsupported type" && 0);
+   }
+}
+
+/*
+   Load flow
+   1. Get layout (base + stride)
+   2. Get global id
+   3. base + id * stride
+   4. Load val
+*/
+LLVMValueRef
+fsa_build_load_input_gpu(struct fsa_llvm_context *ctx,
+                         fsa_gfx_state_member member, int slot_idx,
+                         LLVMValueRef input_idx, int component,
+                         fsa_info_t info_type, LLVMTypeRef dest_type)
+{
+   LLVMValueRef base =
+      fsa_build_get_gfx_layout_base(ctx, member, slot_idx, info_type);
+   LLVMValueRef stride =
+      fsa_build_get_gfx_layout_stride(ctx, member, slot_idx, info_type);
+   /* ele base address = base + global_id * stride */
+   LLVMValueRef addr_val = LLVMBuildAdd(
+      ctx->builder,
+      LLVMBuildMul(ctx->builder, stride, input_idx, "global_id_times_stride"),
+      base, "base_addr");
+   unsigned bit_size = get_bit_size(dest_type);
+   assert("Only supports float now" && bit_size == 32);
+   LLVMValueRef addr_offset =
+      LLVMConstInt(ctx->i64, component * bit_size / 8, false);
+   addr_val = LLVMBuildAdd(ctx->builder, addr_val, addr_offset,
+                           "base_addr_plus_offset");
+   /* Now that we get the addr, load the final scalar value */
+   LLVMTypeRef dest_ptr_type = LLVMPointerType(dest_type, 0);
+   LLVMValueRef ptr = LLVMBuildIntToPtr(ctx->builder, addr_val, dest_ptr_type,
+                                        "load_input_ptr");
+   return LLVMBuildLoad2(ctx->builder, dest_type, ptr, "load_input_val");
+}
+
+LLVMValueRef
+fsa_get_vert_id(struct fsa_llvm_context *ctx, int idx)
+{
+   LLVMValueRef vert_id_arr_ptr =
+      fsa_build_get_gfx_info_member_ptr(ctx, fsa_fsinfo_vert_idx, fsa_fs_info);
+   LLVMValueRef idx_val = LLVMConstInt(ctx->i64, idx, 0);
+   LLVMValueRef vert_id_ptr = LLVMBuildGEP2(
+      ctx->builder, ctx->i32, vert_id_arr_ptr, &idx_val, 1, "vert_id_ptr");
+   LLVMValueRef vert_id =
+      LLVMBuildLoad2(ctx->builder, ctx->i32, vert_id_ptr, "vert_id");
+   return LLVMBuildZExt(ctx->builder, vert_id, ctx->i64, "");
+}
+
+/* offset not used now */
+LLVMValueRef
+fsa_build_load_interpolated_input(struct fsa_llvm_context *ctx,
+                                  LLVMValueRef bary, LLVMValueRef offset,
+                                  fsa_gfx_state_member member, int slot_idx,
+                                  int component, LLVMTypeRef dest_type)
+{
+   /* bary is a LLVM vec3, extract the value from it and interpolate the input */
+   /* val = b0 * v0 + b1 * v1 + b2 * v2 */
+   /* Load three vertices idx and corresponding inputs */
+   LLVMValueRef vert_id[3], input[3], bary_scalar[3], mul_res[3];
+   for (int i = 0; i < 3; i++) {
+      LLVMValueRef idx = LLVMConstInt(ctx->i32, i, 0);
+      bary_scalar[i] =
+         LLVMBuildExtractElement(ctx->builder, bary, idx, "bary_scalar");
+      vert_id[i] = fsa_get_vert_id(ctx, i);
+      input[i] = fsa_build_load_input_gpu(ctx, member, slot_idx, vert_id[i],
+                                          component, fsa_fs_info, dest_type);
+      /* Hardcoded to f32, not interested to f64 now */
+      input[i] = LLVMBuildBitCast(ctx->builder, input[i], ctx->f32, "");
+      mul_res[i] =
+         LLVMBuildFMul(ctx->builder, input[i], bary_scalar[i], "bary_mul_res");
+   }
+   /* Sum up */
+   LLVMValueRef res = LLVMBuildFAdd(
+      ctx->builder, mul_res[2],
+      LLVMBuildFAdd(ctx->builder, mul_res[0], mul_res[1], "bary_add_mid"),
+      "bary_add_final");
+   return res;
 }

@@ -8,7 +8,7 @@ _fsa_compiler_completions()
     
     main_cmd="${COMP_WORDS[1]}"
 
-    local subcommands="bench"
+    local subcommands="bench compile"
 
     # First level
     if [[ ${COMP_CWORD} -eq 1 ]]; then
@@ -28,4 +28,4 @@ _fsa_compiler_completions()
     esac
 }
 
-complete -F _fsa_compiler_completions fsa_compiler
+complete -o default -F _fsa_compiler_completions fsa_compiler

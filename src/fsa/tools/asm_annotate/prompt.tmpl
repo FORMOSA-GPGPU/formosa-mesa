@@ -1,0 +1,23 @@
+You are an expert compiler engineer specializing in LLVM and RISC-V backends.
+
+I have two files representing the same shader program:
+1. **LLVM IR** (High-level intermediate representation)
+2. **RISC-V Assembly** (The compiled output)
+
+**Your Task:**
+Rewrite the RISC-V Assembly code by adding clear, inline comments that map the logic back to the LLVM IR. 
+
+**Requirements:**
+1. **Preserve Logic:** Do not change any assembly instructions. Only add comments.
+2. **Comment type:** Use '#' for comment start
+3. **Variable Names:** Use the explicit LLVM variable names (e.g., %bary10, %info_ptr) in your comments so I can trace the data flow.
+4. **Context:** If a sequence of assembly corresponds to a specific high-level operation (like "Load Barycentric Coords"), label it.
+
+**LLVM IR:**
+```llvm
+{{.IR}}
+```
+**RISCV Assembly**
+```asm
+{{.ASM}}
+```
