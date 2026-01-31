@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <llvm-c/Core.h>
 
-int fsa_llvm_verify_optimize_module(LLVMModuleRef module, FILE *fp);
 int fsa_llvm_verify_host(LLVMModuleRef module, int op_type, int num_ele,
                          void (*fn_golden)(void *, void *, void *, void *));
 int fsa_llvm_verify_rvvm(LLVMModuleRef module, int op_type, int num_ele,
