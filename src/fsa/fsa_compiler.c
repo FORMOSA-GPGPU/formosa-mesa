@@ -19,7 +19,6 @@
 #include "argparse.h"
 #include "fsa_fs_remap_ubo_index.h"
 #include "fsa_llvm_build.h"
-#include "fsa_llvm_verify.h"
 #include "fsa_lower_load_frag_coord_to_scalar.h"
 #include "fsa_lower_to_submit.h"
 #include "fsa_lower_viewport_to_ubo.h"

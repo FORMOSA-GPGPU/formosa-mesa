@@ -21,6 +21,29 @@ fsa_llvm_verify_module(LLVMModuleRef module)
    return 0;
 }
 
+int
+fsa_llvm_verify_optimize_module(LLVMModuleRef module, FILE *fp)
+{
+   LLVMTargetMachineRef target_machine = NULL;
+   LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+
+   /* Configure options */
+   LLVMPassBuilderOptionsSetVerifyEach(options, 0);
+   LLVMPassBuilderOptionsSetDebugLogging(options, 0);
+
+   const char *passes = "default<O1>";
+   LLVMErrorRef error = LLVMRunPasses(module, passes, target_machine, options);
+   if (error) {
+      char *err_msg = LLVMGetErrorMessage(error);
+      fprintf(fp, "Optimization failed: %s\n", err_msg);
+      LLVMDisposeErrorMessage(err_msg);
+      return -1;
+   }
+
+   LLVMDisposePassBuilderOptions(options);
+   return 0;
+}
+
 void
 fsa_print_llvm_module(LLVMModuleRef module, FILE *fp)
 {
