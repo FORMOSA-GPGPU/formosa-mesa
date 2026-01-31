@@ -87,6 +87,8 @@ if with_tools.contains('all')
     'nouveau',
     'asahi',
     'imagination',
+    'fsa-bench',
+    'fsa-tools',
   ]
 endif
 
