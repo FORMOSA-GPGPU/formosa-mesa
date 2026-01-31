@@ -78,6 +78,7 @@ fsa_compiler = executable(
   ],
   link_with : [libglsl_standalone],
   build_rpath : llvm_libdir,
+  install_rpath : llvm_libdir,
   install: true
 )
 
