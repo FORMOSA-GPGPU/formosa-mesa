@@ -17,6 +17,7 @@
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
 #include "argparse.h"
+#include "fsa_fs_remap_ubo_index.h"
 #include "fsa_llvm_build.h"
 #include "fsa_llvm_verify.h"
 #include "fsa_lower_load_frag_coord_to_scalar.h"
@@ -24,6 +25,7 @@
 #include "fsa_lower_viewport_to_ubo.h"
 #include "fsa_lower_viewport_transform.h"
 #include "fsa_nir_to_llvm.h"
+#include "fsa_shift_user_ubo_index.h"
 #include "fsa_util.h"
 
 void initialize_context_to_defaults(struct gl_context *ctx, gl_api api);
@@ -134,6 +136,10 @@ fsa_preprocess_nir(nir_shader *nir)
    NIR_PASS(progress, nir, nir_lower_io, lower_modes, type_size_func,
             (nir_lower_io_options)0);
    NIR_PASS(progress, nir, nir_lower_uniforms_to_ubo, false, false);
+   NIR_PASS(progress, nir, fsa_shift_user_ubo_index, 1);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS(progress, nir, fsa_fs_remap_ubo_index);
+   }
 
    /* lower_viewport_transform matches `store_deref` so it must run after
     * lower_var_copies. It must also run after lower_uniforms_to_ubo because it
@@ -366,10 +372,8 @@ initialize_context(struct gl_context *ctx)
    ctx->Const.Program[MESA_SHADER_COMPUTE].MaxTextureImageUnits = 16;
    ctx->Const.Program[MESA_SHADER_COMPUTE].MaxUniformComponents = 1024;
    ctx->Const.Program[MESA_SHADER_COMPUTE].MaxCombinedUniformComponents = 1024;
-   ctx->Const.Program[MESA_SHADER_COMPUTE].MaxInputComponents =
-      0; /* not used */
-   ctx->Const.Program[MESA_SHADER_COMPUTE].MaxOutputComponents =
-      0; /* not used */
+   ctx->Const.Program[MESA_SHADER_COMPUTE].MaxInputComponents = 0;
+   ctx->Const.Program[MESA_SHADER_COMPUTE].MaxOutputComponents = 0;
    ctx->Const.Program[MESA_SHADER_COMPUTE].MaxAtomicBuffers = 8;
    ctx->Const.Program[MESA_SHADER_COMPUTE].MaxAtomicCounters = 8;
    ctx->Const.Program[MESA_SHADER_COMPUTE].MaxImageUniforms = 8;
@@ -384,6 +388,9 @@ initialize_context(struct gl_context *ctx)
    ctx->Const.MaxTextureCoordUnits = 0;
    ctx->Const.MaxTextureUnits = 0;
    ctx->Const.MaxUniformBufferBindings = 16;
+   ctx->Const.MaxUniformBlockSize = 65536;
+   ctx->Const.MaxCombinedUniformBlocks = 32;
+   ctx->Const.UniformBufferOffsetAlignment = 256;
    ctx->Const.MaxVertexStreams = 4;
    ctx->Const.MaxTransformFeedbackBuffers = 4;
    ctx->Const.MaxUserAssignableUniformLocations = 32;
@@ -392,15 +399,18 @@ initialize_context(struct gl_context *ctx)
    ctx->Const.Program[MESA_SHADER_VERTEX].MaxTextureImageUnits = 16;
    ctx->Const.Program[MESA_SHADER_VERTEX].MaxUniformComponents = 1024;
    ctx->Const.Program[MESA_SHADER_VERTEX].MaxCombinedUniformComponents = 1024;
-   ctx->Const.Program[MESA_SHADER_VERTEX].MaxInputComponents = 0; /* not used */
+   ctx->Const.Program[MESA_SHADER_VERTEX].MaxInputComponents = 0;
    ctx->Const.Program[MESA_SHADER_VERTEX].MaxOutputComponents = 16 * 4;
+   ctx->Const.Program[MESA_SHADER_VERTEX].MaxUniformBlocks = 12;
+   ctx->Const.Program[MESA_SHADER_VERTEX].MaxCombinedUniformComponents = 224;
 
    ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxTextureImageUnits = 16;
    ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxUniformComponents = 224;
    ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxCombinedUniformComponents = 224;
    ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxInputComponents = 15 * 4;
-   ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxOutputComponents =
-      0; /* not used */
+   ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxOutputComponents = 0;
+   ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxUniformBlocks = 12;
+   ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxCombinedUniformComponents = 224;
 
    ctx->Const.MaxVarying =
       ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxInputComponents / 4;

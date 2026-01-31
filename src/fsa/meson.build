@@ -222,6 +222,8 @@ files_fsa_compiler= files(
   'fsa_lower_viewport_to_ubo.c',
   'fsa_lower_to_submit.c',
   'fsa_lower_load_frag_coord_to_scalar.c',
+  'fsa_shift_user_ubo_index.c',
+  'fsa_fs_remap_ubo_index.c',
 )
 
 dep_ncurses = dependency('ncurses')
