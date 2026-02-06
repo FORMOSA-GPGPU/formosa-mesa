@@ -27,6 +27,8 @@
 #include "fsa_shift_user_ubo_index.h"
 #include "fsa_util.h"
 
+#define FILE_NAME_SIZE 512
+
 void initialize_context_to_defaults(struct gl_context *ctx, gl_api api);
 struct gl_shader_program *standalone_create_shader_program(void);
 void standalone_destroy_shader_program(struct gl_shader_program *whole_program);
@@ -321,8 +323,8 @@ assemble_llvm_module(LLVMModuleRef module, const char *prefix)
    char features[] = "-f,-d";
 
    char *error = NULL;
-   char asm_name[64] = {0};
-   sprintf(asm_name, "%s.S", prefix);
+   char asm_name[FILE_NAME_SIZE] = {0};
+   snprintf(asm_name, FILE_NAME_SIZE - 1, "%s.S", prefix);
 
    LLVMTargetRef target;
    if (LLVMGetTargetFromTriple(triple, &target, &error) != 0) {
@@ -439,6 +441,11 @@ cmd_compile(int argc, const char **argv)
       return -1;
    }
 
+   if (strlen(prefix) >= FILE_NAME_SIZE) {
+      printf("Error: Output prefix is too long.\n");
+      return -1;
+   }
+
    if (argc < 2) {
       argparse_usage(&argparse);
       return -1;
@@ -454,23 +461,22 @@ cmd_compile(int argc, const char **argv)
       return -1;
    }
 
-#define NSIZE 512
-   char file_nir[NSIZE] = {0};
-   char file_nir_opt[NSIZE] = {0};
-   char file_vs_llvm[NSIZE] = {0};
-   char file_vs_llvm_opt[NSIZE] = {0};
-   char file_fs_llvm[NSIZE] = {0};
-   char file_fs_llvm_opt[NSIZE] = {0};
-   char file_vs_object[NSIZE] = {0};
-   char file_fs_object[NSIZE] = {0};
-   snprintf(file_nir, NSIZE, "%s.nir", prefix);
-   snprintf(file_nir_opt, NSIZE, "%s.nir.opt", prefix);
-   snprintf(file_vs_llvm, NSIZE, "%s.vs.ll", prefix);
-   snprintf(file_vs_llvm_opt, NSIZE, "%s.vs.opt.ll", prefix);
-   snprintf(file_fs_llvm, NSIZE, "%s.fs.ll", prefix);
-   snprintf(file_fs_llvm_opt, NSIZE, "%s.fs.opt.ll", prefix);
-   snprintf(file_vs_object, NSIZE, "%s.vs", prefix);
-   snprintf(file_fs_object, NSIZE, "%s.fs", prefix);
+   char file_nir[FILE_NAME_SIZE] = {0};
+   char file_nir_opt[FILE_NAME_SIZE] = {0};
+   char file_vs_llvm[FILE_NAME_SIZE] = {0};
+   char file_vs_llvm_opt[FILE_NAME_SIZE] = {0};
+   char file_fs_llvm[FILE_NAME_SIZE] = {0};
+   char file_fs_llvm_opt[FILE_NAME_SIZE] = {0};
+   char file_vs_object[FILE_NAME_SIZE] = {0};
+   char file_fs_object[FILE_NAME_SIZE] = {0};
+   snprintf(file_nir, FILE_NAME_SIZE - 1, "%s.nir", prefix);
+   snprintf(file_nir_opt, FILE_NAME_SIZE - 1, "%s.nir.opt", prefix);
+   snprintf(file_vs_llvm, FILE_NAME_SIZE - 1, "%s.vs.ll", prefix);
+   snprintf(file_vs_llvm_opt, FILE_NAME_SIZE - 1, "%s.vs.opt.ll", prefix);
+   snprintf(file_fs_llvm, FILE_NAME_SIZE - 1, "%s.fs.ll", prefix);
+   snprintf(file_fs_llvm_opt, FILE_NAME_SIZE - 1, "%s.fs.opt.ll", prefix);
+   snprintf(file_vs_object, FILE_NAME_SIZE - 1, "%s.vs", prefix);
+   snprintf(file_fs_object, FILE_NAME_SIZE - 1, "%s.fs", prefix);
 
    FILE *fp_nir = fopen(file_nir, "w");
    FILE *fp_nir_opt = fopen(file_nir_opt, "w");
