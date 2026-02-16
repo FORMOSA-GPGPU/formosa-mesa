@@ -1211,8 +1211,6 @@ visit_store_output_gpu_trivial(struct fsa_nir_context *ctx,
          member = fsa_vary_slot_pos;
       } else if (slot == VARYING_SLOT_PSIZ) {
          member = fsa_vary_slot_psize;
-      } else if (slot >= VARYING_SLOT_TEX0 && slot <= VARYING_SLOT_TEX7) {
-         member = fsa_vary_slot_tex;
       } else if (slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31) {
          member = fsa_vary_slot_var;
          idx = slot - VARYING_SLOT_VAR0;
@@ -1373,6 +1371,18 @@ visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_interpolated_input:
       result = visit_load_interpolated_input(ctx, instr);
       break;
+
+   case nir_intrinsic_quad_swap_horizontal:
+      result = fsa_build_quad_swap(&ctx->fsa, get_src(ctx, instr->src[0]), 0);
+      break;
+   case nir_intrinsic_quad_swap_vertical:
+      result = fsa_build_quad_swap(&ctx->fsa, get_src(ctx, instr->src[0]), 1);
+      break;
+   case nir_intrinsic_load_subgroup_invocation:
+      result = fsa_build_lane_id(&ctx->fsa);
+      /* xlaneid returns 64-bit, truncate to 32 for later use */
+      result = LLVMBuildTrunc(ctx->fsa.builder, result, ctx->fsa.i32, "");
+      break;
    default:
       printf("[V_INTRINISC] Type: %d not implemented,Instr: ",
              instr->instr.type);
@@ -1381,6 +1391,51 @@ visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
       exit(-1);
    }
 
+   if (result) {
+      ctx->ssa_defs[instr->def.index] = result;
+   }
+   return true;
+}
+
+static unsigned
+get_tex_idx(nir_tex_instr *instr)
+{
+   unsigned tex_unit = instr->texture_index;
+   int offset_idx = nir_tex_instr_src_index(instr, nir_tex_src_texture_offset);
+
+   /* No support for texture array */
+   assert(offset_idx == -1);
+   return tex_unit;
+}
+
+static bool
+visit_tex(struct fsa_nir_context *ctx, nir_tex_instr *instr)
+{
+   LLVMValueRef result = NULL;
+   switch (instr->op) {
+   case nir_texop_txs: {
+      fsa_info_t info =
+         ctx->stage == MESA_SHADER_VERTEX ? fsa_vs_info : fsa_fs_info;
+      LLVMValueRef lod = get_src(ctx, instr->src[0].src);
+      int tex_idx = get_tex_idx(instr);
+      result = fsa_build_txs(&ctx->fsa, lod, tex_idx, info);
+      break;
+   }
+   case nir_texop_txl: {
+      fsa_info_t info =
+         ctx->stage == MESA_SHADER_VERTEX ? fsa_vs_info : fsa_fs_info;
+      LLVMValueRef coord = get_src(ctx, instr->src[0].src);
+      LLVMValueRef lod = get_src(ctx, instr->src[1].src);
+      int tex_idx = get_tex_idx(instr);
+      result = fsa_build_txl(&ctx->fsa, coord, lod, tex_idx, info);
+      break;
+   }
+   default:
+      printf("[V_TEX] Type: %d not implemented, op: ", instr->op);
+      nir_print_instr(&instr->instr, stdout);
+      printf("\n");
+      exit(-1);
+   }
    if (result) {
       ctx->ssa_defs[instr->def.index] = result;
    }
@@ -1498,6 +1553,10 @@ visit_block(struct fsa_nir_context *ctx, nir_block *block)
          break;
       case nir_instr_type_intrinsic:
          if (!visit_intrinsic(ctx, nir_instr_as_intrinsic(instr)))
+            return false;
+         break;
+      case nir_instr_type_tex:
+         if (!visit_tex(ctx, nir_instr_as_tex(instr)))
             return false;
          break;
       case nir_instr_type_phi:

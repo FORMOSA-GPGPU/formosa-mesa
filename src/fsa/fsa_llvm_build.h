@@ -56,6 +56,7 @@ struct fsa_llvm_context {
    LLVMTypeRef gfx_fs_info_t;
    LLVMTypeRef gfx_state_t;
    LLVMTypeRef gfx_layout_t;
+   LLVMTypeRef tex_state_t;
 
    LLVMValueRef i8_0;
    LLVMValueRef i8_1;
@@ -219,6 +220,7 @@ typedef enum {
    fsa_vs_info,
    fsa_fs_info,
 } fsa_info_t;
+LLVMValueRef fsa_build_lane_id(struct fsa_llvm_context *ctx);
 LLVMValueRef fsa_build_local_id(struct fsa_llvm_context *ctx);
 LLVMValueRef fsa_build_global_id(struct fsa_llvm_context *ctx,
                                  fsa_info_t info_type);
@@ -231,9 +233,9 @@ typedef enum {
    fsa_vert_attrib = 0,
    fsa_vary_slot_pos,
    fsa_vary_slot_psize,
-   fsa_vary_slot_tex,
    fsa_vary_slot_var,
    fsa_frag_result,
+   fsa_tex_state,
    fsa_viewport_scale,
    fsa_viewport_offset,
    fsa_ubo,
@@ -254,6 +256,17 @@ typedef enum {
    fsa_fsinfo_vert_idx,
    fsa_fsinfo_bary_coord,
 } fsa_fsinfo_member;
+
+typedef enum {
+   fsa_tex_base = 0,
+   fsa_tex_width,
+   fsa_tex_height,
+   fsa_tex_format,
+   fsa_tex_min_filter,
+   fsa_tex_mag_filter,
+   fsa_wrap_u,
+   fsa_wrap_v,
+} fsa_tex_state_member;
 
 LLVMValueRef fsa_build_get_gfx_state_member_ptr(struct fsa_llvm_context *ctx,
                                                 fsa_gfx_state_member member,
@@ -301,4 +314,12 @@ LLVMValueRef fsa_build_load_input_gpu(struct fsa_llvm_context *ctx,
                                       LLVMValueRef input_idx, int component,
                                       fsa_info_t info_type,
                                       LLVMTypeRef dest_type);
+
+LLVMValueRef fsa_build_quad_swap(struct fsa_llvm_context *ctx, LLVMValueRef src,
+                                 int direction);
+
+LLVMValueRef fsa_build_txs(struct fsa_llvm_context *ctx, LLVMValueRef lod,
+                           int tex_id, fsa_info_t info_type);
+LLVMValueRef fsa_build_txl(struct fsa_llvm_context *ctx, LLVMValueRef coord,
+                           LLVMValueRef lod, int tex_idx, fsa_info_t info_type);
 #endif
