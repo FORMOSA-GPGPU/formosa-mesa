@@ -49,6 +49,8 @@ files_common = files(
   'fsa_lower_load_frag_coord_to_scalar.c',
   'fsa_shift_user_ubo_index.c',
   'fsa_fs_remap_ubo_index.c',
+  'fsa_lower_implicit_lod_tex.c',
+  'fsa_lower_deriv.c',
 )
 
 fsa_compiler = executable(

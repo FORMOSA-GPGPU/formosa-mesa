@@ -19,6 +19,8 @@
 #include "argparse.h"
 #include "fsa_fs_remap_ubo_index.h"
 #include "fsa_llvm_build.h"
+#include "fsa_lower_deriv.h"
+#include "fsa_lower_implicit_lod_tex.h"
 #include "fsa_lower_load_frag_coord_to_scalar.h"
 #include "fsa_lower_to_submit.h"
 #include "fsa_lower_viewport_to_ubo.h"
@@ -56,6 +58,9 @@ static GLenum
 fsa_get_stage_from_ext(const char *filename)
 {
    const char *dot = strrchr(filename, '.');
+   if (dot == NULL) {
+      return -1;
+   }
    const char *ext = dot + 1;
    if (!strcmp(ext, "vert") || !strcmp(ext, "vs"))
       return GL_VERTEX_SHADER;
@@ -149,6 +154,23 @@ fsa_preprocess_nir(nir_shader *nir)
       NIR_PASS(progress, nir, fsa_lower_viewport_transform);
       NIR_PASS(progress, nir, fsa_lower_viewport_to_ubo);
    }
+
+   NIR_PASS(progress, nir, fsa_lower_implicit_lod_tex);
+   NIR_PASS(progress, nir, nir_lower_samplers);
+   nir_lower_tex_options tex_opts = {
+      .lower_txp = ~0,
+      .lower_txd = true,
+   };
+   NIR_PASS(progress, nir, nir_lower_tex, &tex_opts);
+   NIR_PASS(progress, nir, fsa_lower_deriv);
+   nir_lower_subgroups_options subgroup_opts = {
+      .subgroup_size = 4,
+      .ballot_bit_size = 4,
+      .lower_to_scalar = true,
+      .lower_quad = false,
+      .lower_shuffle = false,
+   };
+   NIR_PASS(progress, nir, nir_lower_subgroups, &subgroup_opts);
 
    lower_modes = nir_var_shader_in | nir_var_shader_out | nir_var_uniform |
                  nir_var_mem_ubo;
@@ -270,6 +292,7 @@ fsa_nir_to_llvm(nir_shader *shader, int is_cpu)
    LLVMBuildRetVoid(tmp.builder);
 
    if (fsa_llvm_verify_module(tmp.module)) {
+      fsa_print_llvm_module(tmp.module, stdout);
       return NULL;
    }
    return tmp.module;
@@ -311,7 +334,7 @@ fsa_compile_nir_opt(nir_shader *shader)
 }
 
 static const char *const compile_usages[] = {
-   "fsa_compiler compile [options] <vert> <frag>",
+   "fsa_compiler [options] <vert> <frag>",
    NULL,
 };
 

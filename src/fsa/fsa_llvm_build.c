@@ -41,10 +41,10 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
    ctx->v3i16 = LLVMVectorType(ctx->i16, 3);
    ctx->v4i16 = LLVMVectorType(ctx->i16, 4);
    ctx->v2i32 = LLVMVectorType(ctx->i32, 2);
-   ctx->v2i32 = LLVMVectorType(ctx->i32, 3);
+   ctx->v3i32 = LLVMVectorType(ctx->i32, 3);
    ctx->v4i32 = LLVMVectorType(ctx->i32, 4);
    ctx->v2f32 = LLVMVectorType(ctx->f32, 2);
-   ctx->v2f32 = LLVMVectorType(ctx->f32, 3);
+   ctx->v3f32 = LLVMVectorType(ctx->f32, 3);
    ctx->v4f32 = LLVMVectorType(ctx->f32, 4);
 
    ctx->i8_0 = LLVMConstInt(ctx->i8, 0, false);
@@ -79,15 +79,34 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
    LLVMStructSetBody(ctx->gfx_layout_t, layout_layout, 2, 0);
 
    /*
+      struct TexState {
+         uint64_t base;
+         uint32_t width;
+         uint32_t height;
+         uint32_t format;
+         uint32_t min_filter;
+         uint32_t mag_filter;
+         uint32_t wrap_u;
+         uint32_t wrap_v;
+      };
+   */
+   ctx->tex_state_t = LLVMStructCreateNamed(ctx->context, "tex.state");
+   LLVMTypeRef tex_state_layout[] = {
+      ctx->ptrt, ctx->i32, ctx->i32, ctx->i32,
+      ctx->i32,  ctx->i32, ctx->i32, ctx->i32,
+   };
+   LLVMStructSetBody(ctx->tex_state_t, tex_state_layout, 8, 0);
+
+   /*
    struct GfxState {
       // Vertex shader input
       struct GfxLayout vert_attrib_generic[16];
       // Vertex shader output, Fragment shader input
       struct GfxLayout varying_slot_pos[1];
       struct GfxLayout varying_slot_psize[1];
-      struct GfxLayout varying_slot_tex[8];
       struct GfxLayout varying_slot_var[32];
       struct GfxLayout frag_result_data[8];
+      struct TexState tex_state[8];
       float viewport_scale[3];
       float viewport_offset[3];
       void *ubo_base[16];
@@ -99,17 +118,17 @@ fsa_llvm_context_init(struct fsa_llvm_context *ctx)
    LLVMTypeRef vert_attrib_arr = LLVMArrayType(ctx->gfx_layout_t, 16);
    LLVMTypeRef varying_slot_pos_arr = LLVMArrayType(ctx->gfx_layout_t, 1);
    LLVMTypeRef varying_slot_psize_arr = LLVMArrayType(ctx->gfx_layout_t, 1);
-   LLVMTypeRef varying_slot_tex_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
    LLVMTypeRef varying_slot_var_arr = LLVMArrayType(ctx->gfx_layout_t, 32);
    LLVMTypeRef frag_result_data_arr = LLVMArrayType(ctx->gfx_layout_t, 8);
+   LLVMTypeRef tex_state_arr = LLVMArrayType(ctx->tex_state_t, 8);
    LLVMTypeRef viewport_scale_arr = LLVMArrayType(ctx->f32, 3);
    LLVMTypeRef viewport_offset_arr = LLVMArrayType(ctx->f32, 3);
    /* Support only max 16 ubo */
    LLVMTypeRef ubo_base_arr = LLVMArrayType(ctx->ptrt, 16);
    LLVMTypeRef state_layout[] = {
       vert_attrib_arr,        varying_slot_pos_arr,
-      varying_slot_psize_arr, varying_slot_tex_arr,
-      varying_slot_var_arr,   frag_result_data_arr,
+      varying_slot_psize_arr, varying_slot_var_arr,
+      frag_result_data_arr,   tex_state_arr,
       viewport_scale_arr,     viewport_offset_arr,
       ubo_base_arr,           ctx->ptrt,
    };
@@ -1904,6 +1923,12 @@ fsa_build_csr_read(struct fsa_llvm_context *ctx, const char *csr_name)
 }
 
 LLVMValueRef
+fsa_build_lane_id(struct fsa_llvm_context *ctx)
+{
+   return fsa_build_csr_read(ctx, "xlaneid");
+}
+
+LLVMValueRef
 fsa_build_local_id(struct fsa_llvm_context *ctx)
 {
    return fsa_build_csr_read(ctx, "mhartid");
@@ -2213,26 +2238,167 @@ fsa_build_load_interpolated_input(struct fsa_llvm_context *ctx,
                                   fsa_gfx_state_member member, int slot_idx,
                                   int component, LLVMTypeRef dest_type)
 {
-   /* bary is a LLVM vec3, extract the value from it and interpolate the input */
-   /* val = b0 * v0 + b1 * v1 + b2 * v2 */
-   /* Load three vertices idx and corresponding inputs */
-   LLVMValueRef vert_id[3], input[3], bary_scalar[3], mul_res[3];
+   /*
+      Perspective corrected interpolation
+      lerp = sum(input * bary * 1/w) / sum(bary * 1/w)
+      numerator = b0 * 1/w0 * v0 + b1 * 1/w1 * v1 + b2 * 1/w2 * v2
+      denomiator = b0 * 1/w0 + b1 * 1/w1 + b2 * 1/w2
+   */
+   LLVMValueRef vert_id[3], w_rcp[3], input[3], bary_scalar[3], mul_res[3];
+   LLVMValueRef w_rcp_accum = NULL;
    for (int i = 0; i < 3; i++) {
       LLVMValueRef idx = LLVMConstInt(ctx->i32, i, 0);
+      /* bary is a LLVM vec3, extract the value from it and interpolate the
+       * input */
       bary_scalar[i] =
          LLVMBuildExtractElement(ctx->builder, bary, idx, "bary_scalar");
       vert_id[i] = fsa_get_vert_id(ctx, i);
+      w_rcp[i] = fsa_build_load_input_gpu(ctx, fsa_vary_slot_pos, 0, vert_id[i],
+                                          3, fsa_fs_info, ctx->f32);
+      bary_scalar[i] =
+         LLVMBuildFMul(ctx->builder, bary_scalar[i], w_rcp[i], "bary_mul_wrcp");
+
+      /* accumulate w_rcp for denom */
+      if (w_rcp_accum == NULL) {
+         w_rcp_accum = bary_scalar[i];
+      } else {
+         w_rcp_accum = LLVMBuildFAdd(ctx->builder, w_rcp_accum, bary_scalar[i],
+                                     "accum_wrcp");
+      }
+      /* Load varying */
       input[i] = fsa_build_load_input_gpu(ctx, member, slot_idx, vert_id[i],
                                           component, fsa_fs_info, dest_type);
-      /* Hardcoded to f32, not interested to f64 now */
       input[i] = LLVMBuildBitCast(ctx->builder, input[i], ctx->f32, "");
       mul_res[i] =
          LLVMBuildFMul(ctx->builder, input[i], bary_scalar[i], "bary_mul_res");
    }
-   /* Sum up */
+
    LLVMValueRef res = LLVMBuildFAdd(
       ctx->builder, mul_res[2],
       LLVMBuildFAdd(ctx->builder, mul_res[0], mul_res[1], "bary_add_mid"),
       "bary_add_final");
+   res = LLVMBuildFDiv(ctx->builder, res, w_rcp_accum, "");
    return res;
+}
+
+LLVMValueRef
+fsa_build_quad_swap(struct fsa_llvm_context *ctx, LLVMValueRef src,
+                    int direction)
+{
+   /* Obtain lane id */
+   LLVMValueRef lane_id = fsa_build_lane_id(ctx);
+   /*
+      horizontal: 0 <-> 1, 2 <-> 3 => xor 1
+      vertical  : 0 <-> 2, 1 <-> 3 => xor 2
+   */
+   LLVMValueRef xor_num = direction == 0 ? LLVMConstInt(ctx->i64, 1, false)
+                                         : LLVMConstInt(ctx->i64, 2, false);
+   LLVMValueRef target_lane =
+      LLVMBuildXor(ctx->builder, lane_id, xor_num, "swap_lane");
+   /* I assume `src` is always 32-bit when passed in, so extend to 64-bit to
+    * conform with the llvm intrinsic type */
+   LLVMValueRef src_32 = LLVMBuildBitCast(ctx->builder, src, ctx->i32, "");
+   LLVMValueRef src_64 = LLVMBuildZExt(ctx->builder, src_32, ctx->i64, "");
+   LLVMValueRef params[2] = {src_64, target_lane};
+   LLVMValueRef res_64 =
+      fsa_build_intrinsic(ctx, "llvm.riscv.fsa.swap", ctx->i64, params, 2, 0);
+   /* We do not support double type, but fsa.swap will always return 64-bit
+    * value, truncate to 32 for later use */
+   LLVMValueRef res_32 = LLVMBuildTrunc(ctx->builder, res_64, ctx->i32, "");
+   return res_32;
+}
+
+LLVMValueRef
+fsa_build_txs(struct fsa_llvm_context *ctx, LLVMValueRef lod, int tex_id,
+              fsa_info_t info_type)
+{
+   /* Get height/width from tex state */
+   LLVMValueRef tex_state_ptr = fsa_build_get_gfx_state_arr_member_ptr(
+      ctx, fsa_tex_state, ctx->tex_state_t, tex_id, info_type);
+
+   LLVMValueRef indices[1] = {LLVMConstInt(ctx->i32, fsa_tex_width, false)};
+   LLVMValueRef width_ptr = LLVMBuildGEP2(ctx->builder, ctx->i32, tex_state_ptr,
+                                          indices, 1, "tex.width.ptr");
+   indices[0] = LLVMConstInt(ctx->i32, fsa_tex_height, false);
+   LLVMValueRef height_ptr = LLVMBuildGEP2(
+      ctx->builder, ctx->i32, tex_state_ptr, indices, 1, "tex.height.ptr");
+   LLVMValueRef width =
+      LLVMBuildLoad2(ctx->builder, ctx->i32, width_ptr, "tex.width");
+   LLVMValueRef height =
+      LLVMBuildLoad2(ctx->builder, ctx->i32, height_ptr, "tex.height");
+   LLVMValueRef ret = LLVMGetUndef(ctx->v2i32);
+   ret = LLVMBuildInsertElement(ctx->builder, ret, width, ctx->i32_0, "");
+   ret = LLVMBuildInsertElement(ctx->builder, ret, height, ctx->i32_1, "");
+   return ret;
+}
+
+LLVMValueRef
+fsa_build_txl(struct fsa_llvm_context *ctx, LLVMValueRef coord,
+              LLVMValueRef lod, int tex_idx, fsa_info_t info_type)
+{
+   LLVMTypeRef coord_type = LLVMTypeOf(coord);
+   assert(LLVMGetTypeKind(coord_type) == LLVMVectorTypeKind);
+   assert(LLVMGetVectorSize(coord_type) == 2);
+   LLVMValueRef u_32 =
+      LLVMBuildExtractElement(ctx->builder, coord, ctx->i32_0, "tex.u");
+   LLVMValueRef v_32 =
+      LLVMBuildExtractElement(ctx->builder, coord, ctx->i32_1, "tex.v");
+   LLVMValueRef u_64 = LLVMBuildZExt(ctx->builder, u_32, ctx->i64, "");
+   LLVMValueRef v_64 = LLVMBuildZExt(ctx->builder, v_32, ctx->i64, "");
+   LLVMValueRef lod_64 = LLVMBuildZExt(ctx->builder, lod, ctx->i64, "");
+   LLVMValueRef idx = LLVMConstInt(ctx->i32, tex_idx, false);
+   LLVMValueRef params[4] = {u_64, v_64, lod_64, idx};
+   LLVMValueRef color_i64 =
+      fsa_build_intrinsic(ctx, "llvm.riscv.fsa.tex", ctx->i64, params, 4, 0);
+   LLVMValueRef color_i32 =
+      LLVMBuildTrunc(ctx->builder, color_i64, ctx->i32, "");
+
+   /* Unpack color to v4f32 */
+   LLVMValueRef mask = LLVMConstInt(ctx->i32, 0xFF, 0);
+   LLVMValueRef shift_8 = LLVMConstInt(ctx->i32, 8, 0);
+   LLVMValueRef shift_16 = LLVMConstInt(ctx->i32, 16, 0);
+   LLVMValueRef shift_24 = LLVMConstInt(ctx->i32, 24, 0);
+   LLVMValueRef norm = LLVMConstReal(ctx->f32, 1.0 / 255.0);
+
+   LLVMValueRef r_i32 =
+      LLVMBuildAnd(ctx->builder, color_i32, mask, "tex.r.i32");
+   LLVMValueRef g_shift = LLVMBuildLShr(ctx->builder, color_i32, shift_8, "");
+   LLVMValueRef g_i32 = LLVMBuildAnd(ctx->builder, g_shift, mask, "tex.g.i32");
+   LLVMValueRef b_shift = LLVMBuildLShr(ctx->builder, color_i32, shift_16, "");
+   LLVMValueRef b_i32 = LLVMBuildAnd(ctx->builder, b_shift, mask, "tex.b.i32");
+   LLVMValueRef a_i32 =
+      LLVMBuildLShr(ctx->builder, color_i32, shift_24, "tex.a.i32");
+
+   /* Raw floint point (0.0 - 255.0)*/
+   LLVMValueRef r_raw =
+      LLVMBuildUIToFP(ctx->builder, r_i32, ctx->f32, "tex.r.raw");
+   LLVMValueRef g_raw =
+      LLVMBuildUIToFP(ctx->builder, g_i32, ctx->f32, "tex.g.raw");
+   LLVMValueRef b_raw =
+      LLVMBuildUIToFP(ctx->builder, b_i32, ctx->f32, "tex.b.raw");
+   LLVMValueRef a_raw =
+      LLVMBuildUIToFP(ctx->builder, a_i32, ctx->f32, "tex.a.raw");
+
+   /* Normalized to 0.0 ~ 1.0 */
+   LLVMValueRef r_f32 = LLVMBuildFMul(ctx->builder, r_raw, norm, "tex.r.norm");
+   LLVMValueRef g_f32 = LLVMBuildFMul(ctx->builder, g_raw, norm, "tex.g.norm");
+   LLVMValueRef b_f32 = LLVMBuildFMul(ctx->builder, b_raw, norm, "tex.b.norm");
+   LLVMValueRef a_f32 = LLVMBuildFMul(ctx->builder, a_raw, norm, "tex.a.norm");
+
+   /* Construct vec4 */
+   LLVMValueRef color_v4f32 = LLVMGetUndef(ctx->v4f32);
+   LLVMValueRef idx0 = LLVMConstInt(ctx->i32, 0, 0);
+   LLVMValueRef idx1 = LLVMConstInt(ctx->i32, 1, 0);
+   LLVMValueRef idx2 = LLVMConstInt(ctx->i32, 2, 0);
+   LLVMValueRef idx3 = LLVMConstInt(ctx->i32, 3, 0);
+
+   color_v4f32 =
+      LLVMBuildInsertElement(ctx->builder, color_v4f32, r_f32, idx0, "tex.r");
+   color_v4f32 =
+      LLVMBuildInsertElement(ctx->builder, color_v4f32, g_f32, idx1, "tex.rg");
+   color_v4f32 =
+      LLVMBuildInsertElement(ctx->builder, color_v4f32, b_f32, idx2, "tex.rgb");
+   color_v4f32 = LLVMBuildInsertElement(ctx->builder, color_v4f32, a_f32, idx3,
+                                        "tex.rgba");
+   return color_v4f32;
 }

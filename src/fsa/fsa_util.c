@@ -13,7 +13,7 @@ int
 fsa_llvm_verify_module(LLVMModuleRef module)
 {
    char *error = NULL;
-   if (LLVMVerifyModule(module, LLVMAbortProcessAction, &error)) {
+   if (LLVMVerifyModule(module, LLVMPrintMessageAction, &error)) {
       printf("Failed to verify LLVM module: %s\n", error);
       LLVMDisposeMessage(error);
       return -1;
@@ -52,6 +52,7 @@ fsa_print_llvm_module(LLVMModuleRef module, FILE *fp)
    char *ir_str = LLVMPrintModuleToString(module);
    fprintf(fp, "%s", ir_str);
    LLVMDisposeMessage(ir_str);
+   fflush(fp);
 }
 
 void
