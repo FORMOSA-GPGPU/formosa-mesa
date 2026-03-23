@@ -2,6 +2,8 @@
 #ifndef _WINSYS_HANDLE_H_
 #define _WINSYS_HANDLE_H_
 
+#include <stdint.h>
+
 #ifdef _WIN32
 typedef void *HANDLE;
 #endif

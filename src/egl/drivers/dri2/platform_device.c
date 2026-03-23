@@ -299,7 +299,10 @@ device_probe_device(_EGLDisplay *disp)
    if (!dri2_load_driver(disp))
       goto err_load;
 
-   dri2_dpy->loader_extensions = image_loader_extensions;
+   if (dri2_dpy->swrast_not_kms)
+      dri2_dpy->loader_extensions = swrast_loader_extensions;
+   else
+      dri2_dpy->loader_extensions = image_loader_extensions;
    return true;
 
 err_load:

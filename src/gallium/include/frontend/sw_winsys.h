@@ -35,6 +35,7 @@
 #define SW_WINSYS_H
 
 
+#include <stdbool.h>
 #include "util/format/u_formats.h"
 #include "frontend/winsys_handle.h"
 

@@ -9,3 +9,4 @@ src/amd/compiler/**/*
 src/egl/**/*
 src/etnaviv/isa/**/*
 src/fsa/**/*
+src/gallium/drivers/fsa/**/*
