@@ -1,6 +1,7 @@
 #ifndef FSA_EMU_RESOURCE_H
 #define FSA_EMU_RESOURCE_H
 
+#include <stdint.h>
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
 
@@ -8,7 +9,7 @@ struct fsa_emu_resource {
    struct pipe_resource base;
 
    /* offset into dev base */
-   void *dmem_offset;
+   uint64_t dmem_offset;
 
    /* The distance in bytes between rows of a texture */
    uint32_t stride;

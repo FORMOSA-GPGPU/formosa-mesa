@@ -3,12 +3,14 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "falloc.h"
+#include "fsa_debug.h"
 #include "fsa_screen.h"
 
 struct pipe_resource *
 fsa_emu_resource_create(struct pipe_screen *screen,
                         const struct pipe_resource *templat)
 {
+   FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_emu_resource_create\n");
    struct fsa_emu_resource *rsc = CALLOC_STRUCT(fsa_emu_resource);
    if (!rsc) {
       return NULL;
@@ -44,7 +46,7 @@ fsa_emu_resource_create(struct pipe_screen *screen,
    }
    rsc->size = align(size, 64);
 
-   int res = falloc_malloc(&(rsc->dmem_offset), rsc->size);
+   int res = falloc_malloc((void **)&rsc->dmem_offset, rsc->size);
 
    /* OOM */
    if (res) {
@@ -61,11 +63,12 @@ fsa_emu_resource_create(struct pipe_screen *screen,
 void
 fsa_emu_resource_destroy(struct pipe_screen *screen, struct pipe_resource *prsc)
 {
+   FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_emu_resource_destroy\n");
    struct fsa_emu_resource *rsc = fsa_emu_resource(prsc);
    if (rsc->dt) {
       struct fsa_screen *fsa = fsa_screen(screen);
       fsa->winsys->displaytarget_destroy(fsa->winsys, rsc->dt);
    }
-   falloc_free(rsc->dmem_offset);
+   falloc_free((void *)rsc->dmem_offset);
    FREE(rsc);
 }

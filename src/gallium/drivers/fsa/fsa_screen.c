@@ -1,28 +1,51 @@
 #include "fsa_screen.h"
 #include <stdio.h>
-#include "compiler/nir/nir_shader_compiler_options.h"
 #include "pipe/p_defines.h"
 #include "util/format/u_format.h"
 #include "util/u_memory.h"
 #include "util/u_screen.h"
+#include "falloc.h"
+#include "fsa_compiler.h"
 #include "fsa_context.h"
+#include "fsa_debug.h"
 #include "fsa_emu_resource.h"
+#include "fsa_util.h"
+
+int FSA_DEBUG = 0;
+
+static const struct debug_named_value fsa_debug_names[] = {
+   {"screen", FSA_DEBUG_SCREEN, "Screen operations"},
+   {"context", FSA_DEBUG_CONTEXT, "Context operations"},
+   {"draw", FSA_DEBUG_DRAW, "Draw operations"},
+   {"resource", FSA_DEBUG_RESOURCE, "Resource operations"},
+   {"shader", FSA_DEBUG_SHADER, "Shader operations"},
+   {"all", 0xFFFF, "All"},
+   DEBUG_NAMED_VALUE_END};
+
+void
+fsa_debug_init(void)
+{
+   FSA_DEBUG = debug_get_flags_option("FSA_DEBUG", fsa_debug_names, 0);
+}
 
 static const char *
 fsa_screen_get_name(struct pipe_screen *pscreen)
 {
+   FSA_DBG(FSA_DEBUG_SCREEN, "fsa_screen_get_name\n");
    return "GFXEmu";
 }
 
 static const char *
 fsa_screen_get_vendor(struct pipe_screen *pscreen)
 {
+   FSA_DBG(FSA_DEBUG_SCREEN, "fsa_screen_get_vendor\n");
    return "Formosa";
 }
 
 static void
 fsa_screen_destroy(struct pipe_screen *pscreen)
 {
+   FSA_DBG(FSA_DEBUG_SCREEN, "fsa_screen_destroy\n");
    struct fsa_screen *screen = fsa_screen(pscreen);
    FREE(screen);
 }
@@ -82,51 +105,35 @@ fsa_screen_is_format_supported(struct pipe_screen *screen,
    return true;
 }
 
-/* Temp copy from `fsa_compile.c`, merge the two in future changes */
-static const nir_shader_compiler_options _fsa_nir_option = {
-   .lower_pack_half_2x16 = true,
-   .lower_pack_unorm_2x16 = true,
-   .lower_pack_snorm_2x16 = true,
-   .lower_pack_unorm_4x8 = true,
-   .lower_pack_snorm_4x8 = true,
-   .lower_pack_64_2x32 = true,
-   .lower_pack_64_4x16 = true,
-   .lower_pack_32_2x16 = true,
-   .lower_pack_64_2x32_split = true,
-   .lower_pack_32_2x16_split = true,
-   .lower_unpack_half_2x16 = true,
-   .lower_unpack_unorm_2x16 = true,
-   .lower_unpack_snorm_2x16 = true,
-   .lower_unpack_unorm_4x8 = true,
-   .lower_unpack_snorm_4x8 = true,
-   .lower_unpack_64_2x32_split = true,
-   .lower_unpack_32_2x16_split = true,
-};
-
 static const void *
 fsa_get_compiler_options(struct pipe_screen *screen, enum pipe_shader_ir ir,
                          enum pipe_shader_type shader)
 {
+   FSA_DBG(FSA_DEBUG_SHADER, "fsa_get_compiler_options\n");
    if (ir != PIPE_SHADER_IR_NIR) {
       return NULL;
    }
-   return &_fsa_nir_option;
+   return &fsa_nir_option;
 }
 
 static void
 fsa_init_screen_caps(struct fsa_screen *screen)
 {
+   FSA_DBG(FSA_DEBUG_SCREEN, "fsa_init_screen_caps\n");
    struct pipe_caps *caps = (struct pipe_caps *)&screen->base.caps;
 
    u_init_pipe_screen_caps(&screen->base, 1);
 
    caps->npot_textures = true;
    caps->blend_equation_separate = true;
+   caps->draw_indirect = false;
+   caps->multi_draw_indirect = false;
 }
 
 static void
 fsa_init_shader_caps(struct fsa_screen *screen)
 {
+   FSA_DBG(FSA_DEBUG_SCREEN, "fsa_init_shader_caps\n");
    for (unsigned i = 0; i <= PIPE_SHADER_COMPUTE; i++) {
       struct pipe_shader_caps *caps =
          (struct pipe_shader_caps *)&screen->base.shader_caps[i];
@@ -154,6 +161,7 @@ static void
 fsa_fence_reference(struct pipe_screen *screen, struct pipe_fence_handle **ptr,
                     struct pipe_fence_handle *fence)
 {
+   FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_fence_reference\n");
    *ptr = fence;
 }
 
@@ -161,6 +169,7 @@ static bool
 fsa_fence_finish(struct pipe_screen *screen, struct pipe_context *ctx,
                  struct pipe_fence_handle *fence, uint64_t timeout)
 {
+   FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_fence_finish\n");
    return true;
 }
 
@@ -170,6 +179,7 @@ fsa_flush_frontbuffer(struct pipe_screen *screen, struct pipe_context *ctx,
                       unsigned layer, void *winsys_drawable_handle,
                       unsigned nboxes, struct pipe_box *subbox)
 {
+   FSA_DBG(FSA_DEBUG_SCREEN, "fsa_flush_frontbuffer\n");
    struct fsa_screen *fsa = fsa_screen(screen);
    struct fsa_emu_resource *rsc = fsa_emu_resource(resource);
    if (rsc->dt) {
@@ -189,6 +199,7 @@ fsa_resource_get_handle(struct pipe_screen *screen,
                         struct pipe_context *context, struct pipe_resource *tex,
                         struct winsys_handle *handle, unsigned usage)
 {
+   FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_resource_get_handle\n");
    struct fsa_screen *fsa = fsa_screen(screen);
    struct fsa_emu_resource *rsc = fsa_emu_resource(tex);
    if (!rsc->dt)
@@ -199,13 +210,19 @@ fsa_resource_get_handle(struct pipe_screen *screen,
 struct pipe_screen *
 fsa_create_screen(struct sw_winsys *winsys)
 {
-   printf("[FSA] Create screen\n");
+   fsa_debug_init();
+   FSA_DBG(FSA_DEBUG_SCREEN, "fsa_create_screen\n");
    struct fsa_screen *screen = CALLOC_STRUCT(fsa_screen);
    if (!screen)
       return NULL;
 
+   fsa_llvm_riscv_init();
+   falloc_init(0, 0x40000000, false);
+
    fsa_init_screen_caps(screen);
    fsa_init_shader_caps(screen);
+
+   /* TODO: instantiate gfxemu */
 
    screen->winsys = winsys;
 

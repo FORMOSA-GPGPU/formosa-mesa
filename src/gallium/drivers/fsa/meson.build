@@ -3,6 +3,8 @@ files_libfsa = files(
   'fsa_emu_resource.c',
   'falloc.c',
   'fsa_context.c',
+  'fsa_shader.c',
+  'fsa_draw.c',
 )
 
 libfsa = static_library(
@@ -17,10 +19,14 @@ libfsa = static_library(
     inc_gallium,
     inc_gallium_aux
   ],
-  dependencies : [idep_mesautil],
+  dependencies : [idep_mesautil, idep_fsa_compiler],
 )
 
 driver_fsa = declare_dependency(
   compile_args : '-DGALLIUM_FSA',
   link_with : [libfsa],
 )
+
+if with_tests
+  subdir('tests')
+endif

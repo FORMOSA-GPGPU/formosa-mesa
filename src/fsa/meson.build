@@ -53,6 +53,31 @@ files_common = files(
   'fsa_lower_deriv.c',
 )
 
+libfsa_compiler = static_library(
+  'fsa_compiler_lib',
+  [files_common, 'fsa_compiler.c'],
+  c_args: ['-ggdb3'],
+  include_directories : [
+    inc_include,
+    inc_src,
+    inc_mapi,
+    inc_mesa,
+    inc_gallium,
+    inc_gallium_aux
+  ],
+  dependencies: [
+    idep_mesautil,
+    idep_nir,
+    dep_llvm,
+  ],
+)
+
+idep_fsa_compiler = declare_dependency(
+  link_with : libfsa_compiler,
+  include_directories : include_directories('.'),
+  dependencies: [idep_nir, dep_llvm, dep_lld],
+)
+
 fsa_compiler = executable(
   'fsa_compiler',
   [

@@ -365,6 +365,46 @@ assemble_llvm_module(LLVMModuleRef module, const char *prefix)
    }
 }
 
+bool
+fsa_assemble_llvm_module_to_mem(LLVMModuleRef module, void **out_buf,
+                                size_t *out_size)
+{
+   char triple[] = "riscv64-unknown-elf";
+   char cpu[] = "formosa-gpgpu";
+   char features[] = "-f,-d";
+
+   char *error = NULL;
+   LLVMTargetRef target;
+   if (LLVMGetTargetFromTriple(triple, &target, &error) != 0) {
+      printf("Error getting target: %s\n", error);
+      LLVMDisposeMessage(error);
+      return false;
+   }
+   LLVMTargetMachineRef target_machine = LLVMCreateTargetMachine(
+      target, triple, cpu, features, LLVMCodeGenLevelAggressive,
+      LLVMRelocStatic, LLVMCodeModelMedium);
+
+   LLVMMemoryBufferRef mem_buf;
+   if (LLVMTargetMachineEmitToMemoryBuffer(
+          target_machine, module, LLVMObjectFile, &error, &mem_buf) != 0) {
+      printf("Error emitting to memory buffer: %s\n", error);
+      LLVMDisposeMessage(error);
+      LLVMDisposeTargetMachine(target_machine);
+      return false;
+   }
+
+   size_t size = LLVMGetBufferSize(mem_buf);
+   void *buf = malloc(size);
+   memcpy(buf, LLVMGetBufferStart(mem_buf), size);
+
+   *out_buf = buf;
+   *out_size = size;
+
+   LLVMDisposeMemoryBuffer(mem_buf);
+   LLVMDisposeTargetMachine(target_machine);
+   return true;
+}
+
 static void
 initialize_context(struct gl_context *ctx)
 {

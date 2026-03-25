@@ -50,6 +50,8 @@ fsa_nir_lower_to_submit(nir_shader *shader)
    nir_builder b = nir_builder_create(impl);
    nir_block *last_bb = nir_impl_last_block(impl);
 
+   b.cursor = nir_after_block(last_bb);
+
    /* Find color, depth store instr */
    nir_intrinsic_instr *store_color = find_store_to_color(last_bb);
    nir_intrinsic_instr *store_depth = find_store_to_depth(last_bb);
