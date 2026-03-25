@@ -23,7 +23,7 @@ $ meson setup build --prefix=$(pwd)/build/install \
 	-Dc_cpp_args="-ggdb3" \
 	-Dtools="glsl,fsa-bench,fsa-tools" \
 	-Dcpp_rtti=false \
-	-Dbuild-tests = true \
+	-Dbuild-tests=true \
 	--native-file caslab-tt.ini
 $ ninja -C build install # prefix with "bear --" to generate compile_commands.json
 $ LD_LIBRARY_PATH=$LLVM_LIB_DIR ./build/bin/fsa_compiler

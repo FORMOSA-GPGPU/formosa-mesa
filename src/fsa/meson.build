@@ -119,6 +119,7 @@ if with_tools.contains('fsa-bench')
   formosa = cmake.subproject('formosa', options: formosa_opt)
   message('CMake targets:\n - ' + '\n - '.join(formosa.target_list()))
   dep_uscsim = formosa.dependency('uscsim')
+  dep_libsoftfloat_formosa = formosa.dependency('softfloat')
 
   # Force use fsa-llvm
   llvm_bindir = dep_llvm.get_variable(configtool: 'bindir')
@@ -278,7 +279,6 @@ if with_tools.contains('fsa-bench')
   )
 
   dep_ncurses = dependency('ncurses')
-  dep_libsoftfloat = dependency('berkeley-softfloat-3')
   dep_spike = dependency('riscv-isa-sim')
 
   fsa_rpath = meson.global_build_root()/'subprojects/riscv-isa-sim/build' + ':'
@@ -311,7 +311,7 @@ if with_tools.contains('fsa-bench')
       idep_nir,
       dep_llvm,
       dep_ncurses,
-      dep_libsoftfloat,
+      dep_libsoftfloat_formosa,
       dep_elf,
       dep_lld,
       dep_spike,

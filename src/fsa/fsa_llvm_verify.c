@@ -516,8 +516,9 @@ fsa_llvm_verify_uscsim(LLVMModuleRef module, int op_type, int num_ele,
       return -1;
    }
 
-   USCSimSystem *usc = uscsim_create(0x10000000, false, false);
-   USCSimKernel *kernel = uscsim_create_kernel(elf_name);
+   USCSimSystem *usc = uscsim_create(0x10000000, false, false, false, false,
+                                     false, false, false, false);
+   USCSimKernel *kernel = uscsim_create_kernel(elf_name, 0, 0, 0, 0);
    /* clang-format off */
    /*
       Doing SIMT verication with 1 warp / 4 threads
