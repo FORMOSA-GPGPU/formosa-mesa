@@ -8,9 +8,24 @@ dep_lld = declare_dependency(
   dependencies : [
     lib_lld_elf,
     lib_lld_common,
-    dep_llvm 
+    dep_llvm
   ],
 )
+
+# formosa for uscsim
+cmake = import('cmake')
+formosa_opt = cmake.subproject_options()
+formosa_opt.add_cmake_defines({
+  'CMAKE_BUILD_TYPE': 'Debug',
+})
+formosa = cmake.subproject('formosa', options: formosa_opt)
+dep_uscsim = formosa.dependency('uscsim')
+dep_libsoftfloat = formosa.dependency('softfloat')
+
+# Force use fsa-llvm
+llvm_bindir = dep_llvm.get_variable(configtool: 'bindir')
+fsa_clang = find_program('clang', dirs: [llvm_bindir])
+fsa_llvm_link = find_program('llvm-link', dirs: [llvm_bindir])
 
 # GPU libm
 files_libm = files(
@@ -38,6 +53,107 @@ files_libm = files(
   'libm/scalbnf.c',
 )
 
+clang_c_to_bc_gpu = generator(
+  fsa_clang,
+  arguments : [
+    '-emit-llvm',
+    '-c', '@INPUT@',
+    '-o', '@OUTPUT@',
+    '-target', 'riscv64-unknown-elf',
+    '-mcpu=formosa-gpgpu',
+    '-nostdinc',
+    '-ffreestanding',
+    '-fno-builtin',
+    '-ffunction-sections',
+    '-fdata-sections',
+    '-O3',
+    '-I@CURRENT_SOURCE_DIR@/libm',
+  ],
+  output : '@BASENAME@.bc'
+)
+
+fsa_libm_gpu_bc_files = clang_c_to_bc_gpu.process(
+  files_libm,
+  preserve_path_from : meson.current_source_dir()
+)
+
+fsa_libm_gpu_linked_bc = custom_target(
+  'fsa_libm_gpu.bc',
+  input: fsa_libm_gpu_bc_files,
+  output: 'fsa_libm_gpu.bc',
+  command : [
+    fsa_llvm_link,
+    '@INPUT@',
+    '-o', '@OUTPUT@'
+  ],
+)
+
+fsa_libm_gpu_bc_h = custom_target(
+  'fsa_libm_gpu_bc.h',
+  input : fsa_libm_gpu_linked_bc,
+  output : 'fsa_libm_gpu_bc.h',
+  command : [
+    prog_python,
+    join_paths(meson.global_source_root(), 'src/util/xxd.py'),
+    '@INPUT@',
+    '@OUTPUT@',
+    '-b',
+    '-n', 'fsa_libm_gpu_bc'
+  ]
+)
+
+fsa_uscsim_ld = custom_target(
+  'fsa_uscsim_bench.ld.h',
+  input : 'fsa_uscsim_bench.ld',
+  output : 'fsa_uscsim_bench.ld.h',
+  command : [
+    prog_python,
+    join_paths(meson.global_source_root(), 'src/util/xxd.py'),
+    '@INPUT@',
+    '@OUTPUT@',
+    '-n', 'fsa_uscsim_ld'
+  ]
+)
+
+fsa_uscsim_startup = custom_target(
+  'fsa_uscsim_bench.S.h',
+  input : 'fsa_uscsim_bench.S',
+  output : 'fsa_uscsim_bench.S.h',
+  command : [
+    prog_python,
+    join_paths(meson.global_source_root(), 'src/util/xxd.py'),
+    '@INPUT@',
+    '@OUTPUT@',
+    '-n', 'fsa_uscsim_startup'
+  ]
+)
+
+fsa_shader_ld = custom_target(
+  'fsa_shader.ld.h',
+  input : 'fsa_shader.ld',
+  output : 'fsa_shader.ld.h',
+  command : [
+    prog_python,
+    join_paths(meson.global_source_root(), 'src/util/xxd.py'),
+    '@INPUT@',
+    '@OUTPUT@',
+    '-n', 'fsa_shader_ld'
+  ]
+)
+
+fsa_shader_startup = custom_target(
+  'fsa_shader.S.h',
+  input : 'fsa_shader.S',
+  output : 'fsa_shader.S.h',
+  command : [
+    prog_python,
+    join_paths(meson.global_source_root(), 'src/util/xxd.py'),
+    '@INPUT@',
+    '@OUTPUT@',
+    '-n', 'fsa_shader_startup'
+  ]
+)
+
 files_common = files(
   'fsa_nir_to_llvm.c',
   'fsa_llvm_build.c',
@@ -55,8 +171,17 @@ files_common = files(
 
 libfsa_compiler = static_library(
   'fsa_compiler_lib',
-  [files_common, 'fsa_compiler.c'],
+  [
+    files_common,
+    'fsa_compiler.c',
+    'fsa_lld_helper.cc',
+    fsa_libm_gpu_bc_h,
+    fsa_shader_ld,
+    fsa_shader_startup,
+  ],
   c_args: ['-ggdb3'],
+  cpp_args: ['-ggdb3', '-fno-rtti'],
+  override_options : ['cpp_std=c++20'],
   include_directories : [
     inc_include,
     inc_src,
@@ -69,13 +194,14 @@ libfsa_compiler = static_library(
     idep_mesautil,
     idep_nir,
     dep_llvm,
+    dep_lld,
   ],
 )
 
 idep_fsa_compiler = declare_dependency(
   link_with : libfsa_compiler,
   include_directories : include_directories('.'),
-  dependencies: [idep_nir, dep_llvm, dep_lld],
+  dependencies: [idep_nir, dep_llvm, dep_lld, dep_uscsim, dep_libsoftfloat],
 )
 
 fsa_compiler = executable(
@@ -84,6 +210,10 @@ fsa_compiler = executable(
     files_common,
     'main_compiler.c',
     'fsa_compiler.c',
+    'fsa_lld_helper.cc',
+    fsa_libm_gpu_bc_h,
+    fsa_uscsim_ld,
+    fsa_uscsim_startup,
   ],
   c_args: ['-ggdb3'],
   cpp_args: ['-ggdb3', '-fno-rtti'],
@@ -93,6 +223,7 @@ fsa_compiler = executable(
     idep_mesautil,
     idep_nir,
     dep_llvm,
+    dep_lld,
     dep_elf,
   ],
   include_directories : [
@@ -110,21 +241,6 @@ fsa_compiler = executable(
 )
 
 if with_tools.contains('fsa-bench')
-  # formosa for uscsim
-  cmake = import('cmake')
-  formosa_opt = cmake.subproject_options()
-  formosa_opt.add_cmake_defines({
-    'CMAKE_BUILD_TYPE': 'Debug',
-  })
-  formosa = cmake.subproject('formosa', options: formosa_opt)
-  message('CMake targets:\n - ' + '\n - '.join(formosa.target_list()))
-  dep_uscsim = formosa.dependency('uscsim')
-  dep_libsoftfloat_formosa = formosa.dependency('softfloat')
-
-  # Force use fsa-llvm
-  llvm_bindir = dep_llvm.get_variable(configtool: 'bindir')
-  fsa_clang = find_program('clang', dirs: [llvm_bindir])
-
   clang_c_to_bc_cpu = generator(
     fsa_clang,
     arguments : [
@@ -144,37 +260,12 @@ if with_tools.contains('fsa-bench')
     output : '@BASENAME@.bc'
   )
 
-  clang_c_to_bc_gpu = generator(
-    fsa_clang,
-    arguments : [
-      '-emit-llvm',
-      '-c', '@INPUT@',
-      '-o', '@OUTPUT@',
-      '-target', 'riscv64-unknown-elf',
-      '-mcpu=formosa-gpgpu',
-      '-nostdinc',
-      '-ffreestanding',
-      '-fno-builtin',
-      '-ffunction-sections',
-      '-fdata-sections',
-      '-O3',
-      '-I@CURRENT_SOURCE_DIR@/libm',
-    ],
-    output : '@BASENAME@.bc'
-  )
-
   fsa_libm_bc_files = clang_c_to_bc_cpu.process(
     files_libm,
     preserve_path_from : meson.current_source_dir()
   )
 
-  fsa_libm_gpu_bc_files = clang_c_to_bc_gpu.process(
-    files_libm,
-    preserve_path_from : meson.current_source_dir()
-  )
-
   # Link all math bc
-  fsa_llvm_link = find_program('llvm-link', dirs: [llvm_bindir])
   fsa_libm_linked_bc = custom_target(
     'fsa_libm.bc',
     input: fsa_libm_bc_files,
@@ -197,32 +288,6 @@ if with_tools.contains('fsa-bench')
       '@OUTPUT@',
       '-b',
       '-n', 'fsa_libm_bc'
-    ]
-  )
-
-  # GPU libm
-  fsa_libm_gpu_linked_bc = custom_target(
-    'fsa_libm_gpu.bc',
-    input: fsa_libm_gpu_bc_files,
-    output: 'fsa_libm_gpu.bc',
-    command : [
-      fsa_llvm_link,
-      '@INPUT@',
-      '-o', '@OUTPUT@'
-    ],
-  )
-
-  fsa_libm_gpu_bc_h = custom_target(
-    'fsa_libm_gpu_bc.h',
-    input : fsa_libm_gpu_linked_bc,
-    output : 'fsa_libm_gpu_bc.h',
-    command : [
-      prog_python,
-      join_paths(meson.global_source_root(), 'src/util/xxd.py'),
-      '@INPUT@',
-      '@OUTPUT@',
-      '-b',
-      '-n', 'fsa_libm_gpu_bc'
     ]
   )
 
@@ -249,32 +314,6 @@ if with_tools.contains('fsa-bench')
       '@INPUT@',
       '@OUTPUT@',
       '-n', 'fsa_spike_startup'
-    ]
-  )
-
-  fsa_uscsim_ld = custom_target(
-    'fsa_uscsim.ld.h',
-    input : 'fsa_uscsim.ld',
-    output : 'fsa_uscsim.ld.h',
-    command : [
-      prog_python,
-      join_paths(meson.global_source_root(), 'src/util/xxd.py'),
-      '@INPUT@',
-      '@OUTPUT@',
-      '-n', 'fsa_uscsim_ld'
-    ]
-  )
-
-  fsa_uscsim_startup = custom_target(
-    'fsa_uscsim.S.h',
-    input : 'fsa_uscsim.S',
-    output : 'fsa_uscsim.S.h',
-    command : [
-      prog_python,
-      join_paths(meson.global_source_root(), 'src/util/xxd.py'),
-      '@INPUT@',
-      '@OUTPUT@',
-      '-n', 'fsa_uscsim_startup'
     ]
   )
 
@@ -311,7 +350,7 @@ if with_tools.contains('fsa-bench')
       idep_nir,
       dep_llvm,
       dep_ncurses,
-      dep_libsoftfloat_formosa,
+      dep_libsoftfloat,
       dep_elf,
       dep_lld,
       dep_spike,

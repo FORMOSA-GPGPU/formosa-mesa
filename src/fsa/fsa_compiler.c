@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "compiler/glsl/builtin_functions.h"
 #include "compiler/glsl/gl_nir_linker.h"
 #include "compiler/glsl/glsl_parser_extras.h"
@@ -13,11 +14,15 @@
 #include "main/shaderapi.h"
 #include "main/shaderobj.h"
 #include <llvm-c/Analysis.h>
+#include <llvm-c/BitReader.h>
 #include <llvm-c/DebugInfo.h>
+#include <llvm-c/Linker.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
 #include "argparse.h"
 #include "fsa_fs_remap_ubo_index.h"
+#include "fsa_libm_gpu_bc.h"
+#include "fsa_lld_helper.h"
 #include "fsa_llvm_build.h"
 #include "fsa_lower_deriv.h"
 #include "fsa_lower_implicit_lod_tex.h"
@@ -26,7 +31,11 @@
 #include "fsa_lower_viewport_to_ubo.h"
 #include "fsa_lower_viewport_transform.h"
 #include "fsa_nir_to_llvm.h"
+#include "fsa_shader.S.h"
+#include "fsa_shader.ld.h"
 #include "fsa_shift_user_ubo_index.h"
+#include "fsa_uscsim_bench.S.h"
+#include "fsa_uscsim_bench.ld.h"
 #include "fsa_util.h"
 
 #define FILE_NAME_SIZE 512
@@ -131,6 +140,17 @@ fsa_preprocess_nir(nir_shader *nir)
    /* Move temp global-vars to local */
    NIR_PASS(progress, nir, nir_lower_global_vars_to_local);
    NIR_PASS(progress, nir, nir_lower_var_copies);
+   NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
+   int lower_modes = nir_var_shader_in | nir_var_shader_out | nir_var_uniform;
+   nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
+                               nir->info.stage);
+   nir_assign_io_var_locations(nir, nir_var_shader_out, &nir->num_outputs,
+                               nir->info.stage);
+   NIR_PASS(progress, nir, nir_lower_io, lower_modes, type_size_func,
+            nir_lower_io_use_interpolated_input_intrinsics);
+   NIR_PASS(progress, nir, nir_opt_dce);
+   NIR_PASS(progress, nir, nir_remove_dead_variables,
+            lower_modes | nir_var_function_temp, NULL);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(progress, nir, fsa_nir_lower_to_submit);
@@ -138,9 +158,6 @@ fsa_preprocess_nir(nir_shader *nir)
 
    NIR_PASS(progress, nir, fsa_lower_load_frag_coord_to_scalar);
 
-   int lower_modes = nir_var_shader_in | nir_var_shader_out | nir_var_uniform;
-   NIR_PASS(progress, nir, nir_lower_io, lower_modes, type_size_func,
-            (nir_lower_io_options)0);
    NIR_PASS(progress, nir, nir_lower_uniforms_to_ubo, false, false);
    NIR_PASS(progress, nir, fsa_shift_user_ubo_index, 1);
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -338,8 +355,8 @@ static const char *const compile_usages[] = {
    NULL,
 };
 
-static void
-assemble_llvm_module(LLVMModuleRef module, const char *prefix)
+void
+fsa_dump_llvm_asm(LLVMModuleRef module, const char *prefix)
 {
    char triple[] = "riscv64-unknown-elf";
    char cpu[] = "formosa-gpgpu";
@@ -369,9 +386,29 @@ bool
 fsa_assemble_llvm_module_to_mem(LLVMModuleRef module, void **out_buf,
                                 size_t *out_size)
 {
+   bool debug = getenv("FSA_DEBUG") != NULL;
    char triple[] = "riscv64-unknown-elf";
    char cpu[] = "formosa-gpgpu";
    char features[] = "-f,-d";
+
+   /* Append startup assembly */
+   LLVMAppendModuleInlineAsm(module, fsa_shader_startup,
+                             strlen(fsa_shader_startup));
+
+   /* Link GPU libm */
+   LLVMMemoryBufferRef libm_mem_buf = LLVMCreateMemoryBufferWithMemoryRange(
+      fsa_libm_gpu_bc, sizeof(fsa_libm_gpu_bc), "fsa_libm_gpu_bc", 0);
+   LLVMModuleRef libm_mod = NULL;
+   if (LLVMParseBitcode2(libm_mem_buf, &libm_mod) != 0) {
+      printf("Error parsing libm bitcode\n");
+      LLVMDisposeMemoryBuffer(libm_mem_buf);
+      return false;
+   }
+   LLVMDisposeMemoryBuffer(libm_mem_buf);
+   if (LLVMLinkModules2(module, libm_mod) != 0) {
+      printf("Error linking libm\n");
+      return false;
+   }
 
    char *error = NULL;
    LLVMTargetRef target;
@@ -384,24 +421,99 @@ fsa_assemble_llvm_module_to_mem(LLVMModuleRef module, void **out_buf,
       target, triple, cpu, features, LLVMCodeGenLevelAggressive,
       LLVMRelocStatic, LLVMCodeModelMedium);
 
-   LLVMMemoryBufferRef mem_buf;
-   if (LLVMTargetMachineEmitToMemoryBuffer(
-          target_machine, module, LLVMObjectFile, &error, &mem_buf) != 0) {
-      printf("Error emitting to memory buffer: %s\n", error);
+   /* Emit object to temp file for linker */
+   char obj_name[] = "/tmp/fsa_obj_XXXXXX";
+   int obj_fd = mkstemp(obj_name);
+   if (obj_fd < 0) {
+      LLVMDisposeTargetMachine(target_machine);
+      return false;
+   }
+   close(obj_fd);
+   if (LLVMTargetMachineEmitToFile(target_machine, module, obj_name,
+                                   LLVMObjectFile, &error) != 0) {
+      printf("Error emitting object: %s\n", error);
       LLVMDisposeMessage(error);
+      unlink(obj_name);
       LLVMDisposeTargetMachine(target_machine);
       return false;
    }
 
-   size_t size = LLVMGetBufferSize(mem_buf);
-   void *buf = malloc(size);
-   memcpy(buf, LLVMGetBufferStart(mem_buf), size);
+   /* Write linker script to temp file */
+   char ld_name[] = "/tmp/fsa_ld_XXXXXX";
+   int ld_fd = mkstemp(ld_name);
+   if (ld_fd < 0) {
+      unlink(obj_name);
+      LLVMDisposeTargetMachine(target_machine);
+      return false;
+   }
+   size_t ld_len = strlen(fsa_shader_ld);
+   if ((size_t)write(ld_fd, fsa_shader_ld, ld_len) != ld_len) {
+      close(ld_fd);
+      unlink(ld_name);
+      unlink(obj_name);
+      LLVMDisposeTargetMachine(target_machine);
+      return false;
+   }
+   close(ld_fd);
+
+   /* Link to ELF */
+   char elf_name[] = "/tmp/fsa_elf_XXXXXX";
+   int elf_fd = mkstemp(elf_name);
+   if (elf_fd < 0) {
+      unlink(ld_name);
+      unlink(obj_name);
+      LLVMDisposeTargetMachine(target_machine);
+      return false;
+   }
+   close(elf_fd);
+
+   char ldfile_flag[64] = {0};
+   char output_flag[64] = {0};
+   snprintf(ldfile_flag, sizeof(ldfile_flag), "-T%s", ld_name);
+   snprintf(output_flag, sizeof(output_flag), "-o%s", elf_name);
+   const char *lld_args[] = {"-melf64lriscv", "--gc-sections", ldfile_flag,
+                             obj_name, output_flag};
+   if (debug) {
+      printf("SHADER:obj=%s ld=%s elf=%s\n", obj_name, ld_name, elf_name);
+   }
+
+   bool ld_ok = fsa_lld_link_elf(sizeof(lld_args) / sizeof(lld_args[0]),
+                                 lld_args, &error);
+   if (!debug) {
+      unlink(obj_name);
+      unlink(ld_name);
+   }
+   LLVMDisposeTargetMachine(target_machine);
+   if (!ld_ok) {
+      printf("Linker failed: %s\n", error);
+      fsa_lld_free_msg(error);
+      unlink(elf_name);
+      return false;
+   }
+
+   /* Read ELF into memory */
+   FILE *f = fopen(elf_name, "rb");
+   if (!debug)
+      unlink(elf_name);
+   if (!f)
+      return false;
+   fseek(f, 0, SEEK_END);
+   long elf_size = ftell(f);
+   fseek(f, 0, SEEK_SET);
+   void *buf = malloc(elf_size);
+   if (!buf) {
+      fclose(f);
+      return false;
+   }
+   if ((long)fread(buf, 1, elf_size, f) != elf_size) {
+      free(buf);
+      fclose(f);
+      return false;
+   }
+   fclose(f);
 
    *out_buf = buf;
-   *out_size = size;
-
-   LLVMDisposeMemoryBuffer(mem_buf);
-   LLVMDisposeTargetMachine(target_machine);
+   *out_size = (size_t)elf_size;
    return true;
 }
 
@@ -597,9 +709,9 @@ cmd_compile(int argc, const char **argv)
    /* Compile to riscv asm for each shader */
    fsa_llvm_riscv_init();
    printf("Assemble VS\n");
-   assemble_llvm_module(vert_module, file_vs_object);
+   fsa_dump_llvm_asm(vert_module, file_vs_object);
    printf("Assemble FS\n");
-   assemble_llvm_module(frag_module, file_fs_object);
+   fsa_dump_llvm_asm(frag_module, file_fs_object);
 
    fsa_compiler_cleanup(whole_program);
    return 0;

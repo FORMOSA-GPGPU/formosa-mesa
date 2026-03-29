@@ -23,13 +23,12 @@ fsa_emu_resource_create(struct pipe_screen *screen,
    uint32_t size = 0;
 
    if (templat->target == PIPE_BUFFER) {
-      size = templat->width0;
+      /* 1D */
       rsc->stride = 0;
    } else {
       /* 2D linear */
       uint32_t bytes_per_pixel = util_format_get_blocksize(templat->format);
       rsc->stride = templat->width0 * bytes_per_pixel;
-      size = rsc->stride * templat->height0;
    }
 
    if (templat->bind & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT)) {
@@ -47,6 +46,7 @@ fsa_emu_resource_create(struct pipe_screen *screen,
    rsc->size = align(size, 64);
 
    int res = falloc_malloc((void **)&rsc->dmem_offset, rsc->size);
+   FSA_DBG(FSA_DEBUG_RESOURCE, "   addr:%lx\n", rsc->dmem_offset);
 
    /* OOM */
    if (res) {

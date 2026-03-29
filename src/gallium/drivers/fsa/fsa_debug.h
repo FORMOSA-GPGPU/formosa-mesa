@@ -8,6 +8,11 @@
 #define FSA_DEBUG_DRAW     0x4
 #define FSA_DEBUG_RESOURCE 0x8
 #define FSA_DEBUG_SHADER   0x10
+#define FSA_DEBUG_NIR      0x20
+#define FSA_DEBUG_ASM      0x40
+#define FSA_DEBUG_EMU_VS   0x80
+#define FSA_DEBUG_EMU_FS   0x100
+#define FSA_DEBUG_ALL      (FSA_DEBUG_NIR - 1)
 
 extern int FSA_DEBUG;
 

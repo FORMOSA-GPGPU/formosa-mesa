@@ -19,7 +19,11 @@ static const struct debug_named_value fsa_debug_names[] = {
    {"draw", FSA_DEBUG_DRAW, "Draw operations"},
    {"resource", FSA_DEBUG_RESOURCE, "Resource operations"},
    {"shader", FSA_DEBUG_SHADER, "Shader operations"},
-   {"all", 0xFFFF, "All"},
+   {"nir", FSA_DEBUG_NIR, "NIR operations"},
+   {"asm", FSA_DEBUG_ASM, "ASM operations"},
+   {"verbose", FSA_DEBUG_ALL, "All (except emu)"},
+   {"emu_vs", FSA_DEBUG_EMU_VS, "ggdb vs"},
+   {"emu_fs", FSA_DEBUG_EMU_FS, "ggdb fs"},
    DEBUG_NAMED_VALUE_END};
 
 void
@@ -47,6 +51,7 @@ fsa_screen_destroy(struct pipe_screen *pscreen)
 {
    FSA_DBG(FSA_DEBUG_SCREEN, "fsa_screen_destroy\n");
    struct fsa_screen *screen = fsa_screen(pscreen);
+   gfxemu_destroy(screen->emu);
    FREE(screen);
 }
 
@@ -60,49 +65,46 @@ fsa_screen_is_format_supported(struct pipe_screen *screen,
    if (sample_count > 1 || storage_sample_count > 1) {
       return false;
    }
-   if (target != PIPE_BUFFER && target != PIPE_TEXTURE_2D) {
+   if (target != PIPE_BUFFER && target != PIPE_TEXTURE_2D &&
+       target != PIPE_TEXTURE_RECT && target != PIPE_TEXTURE_2D_ARRAY) {
       return false;
    }
 
-   /* Z* : depth S* : stencil */
-   if (bindings & PIPE_BIND_DEPTH_STENCIL) {
-      if (!util_format_is_depth_or_stencil(format))
-         return false;
-      switch (format) {
-      case PIPE_FORMAT_Z32_FLOAT:
-         break;
-      default:
+   /* Additional format support added to enable gles3.0 */
+   switch (format) {
+   case PIPE_FORMAT_B8G8R8A8_UNORM:
+   case PIPE_FORMAT_B8G8R8A8_SRGB:
+      if (bindings & PIPE_BIND_DEPTH_STENCIL) {
          return false;
       }
-   }
+      return true;
 
-   /* Color */
-   if (bindings & PIPE_BIND_RENDER_TARGET) {
-      if (util_format_is_depth_or_stencil(format))
-         return false;
-
-      switch (format) {
-      case PIPE_FORMAT_B8G8R8A8_UNORM:
-         break;
-      default:
-         return false;
-      }
-   }
-
-   /* Not sure what this is */
-   if (bindings & PIPE_BIND_SAMPLER_VIEW) {
-      if (format != PIPE_FORMAT_B8G8R8A8_UNORM) {
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R8G8B8A8_SRGB:
+   case PIPE_FORMAT_R8G8B8A8_SNORM:
+   case PIPE_FORMAT_R8G8_UNORM:
+   case PIPE_FORMAT_R8_UNORM:
+   case PIPE_FORMAT_R16G16B16A16_FLOAT:
+   case PIPE_FORMAT_R32G32B32A32_FLOAT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+   case PIPE_FORMAT_R9G9B9E5_FLOAT:
+      if (bindings & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET |
+                      PIPE_BIND_DEPTH_STENCIL)) {
          return false;
       }
-   }
+      return true;
 
-   /* Scanout / Display */
-   if (bindings & PIPE_BIND_DISPLAY_TARGET) {
-      if (format != PIPE_FORMAT_B8G8R8A8_UNORM) {
+   case PIPE_FORMAT_Z32_FLOAT:
+   case PIPE_FORMAT_Z32_UNORM:
+   case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
+      if (bindings & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET)) {
          return false;
       }
+      return true;
+
+   default:
+      return false;
    }
-   return true;
 }
 
 static const void *
@@ -128,6 +130,23 @@ fsa_init_screen_caps(struct fsa_screen *screen)
    caps->blend_equation_separate = true;
    caps->draw_indirect = false;
    caps->multi_draw_indirect = false;
+   /* For MaxViewportWidth/Height 640*480 */
+   caps->max_texture_2d_size = 16384;
+
+   /* Features added to support gles 3.0 */
+   caps->glsl_feature_level = 130;
+   caps->glsl_feature_level_compatibility = 130;
+   caps->fragment_shader_texture_lod = true;
+   caps->texture_float_linear = true;
+   caps->texture_half_float_linear = true;
+   caps->mixed_framebuffer_sizes = true;
+   caps->vs_instanceid = true;
+   caps->vertex_element_instance_divisor = true;
+   caps->primitive_restart_fixed_index = true;
+   caps->max_texture_array_layers = 256;
+   caps->max_stream_output_buffers = 4;
+   caps->max_render_targets = 4;
+   caps->essl_feature_level = 130;
 }
 
 static void
@@ -154,6 +173,7 @@ fsa_init_shader_caps(struct fsa_screen *screen)
       caps->max_temps = 256;
       caps->max_texture_samplers = 8;
       caps->max_sampler_views = 8;
+      caps->indirect_const_addr = true;
    }
 }
 
@@ -186,7 +206,14 @@ fsa_flush_frontbuffer(struct pipe_screen *screen, struct pipe_context *ctx,
       void *host_map =
          fsa->winsys->displaytarget_map(fsa->winsys, rsc->dt, PIPE_MAP_WRITE);
       if (host_map) {
-         /* TODO: memcpy from sim vram to display target */
+         unsigned width = resource->width0;
+         unsigned height = resource->height0;
+         unsigned src_stride = rsc->stride;
+         for (unsigned y = 0; y < height; y++) {
+            uint8_t *dst_row = (uint8_t *)host_map + y * rsc->stride;
+            uint64_t src_addr = rsc->dmem_offset + (uint64_t)y * src_stride;
+            gfxemu_read_mem(fsa->emu, dst_row, src_addr, width * 4);
+         }
          fsa->winsys->displaytarget_unmap(fsa->winsys, rsc->dt);
       }
       fsa->winsys->displaytarget_display(
@@ -207,6 +234,17 @@ fsa_resource_get_handle(struct pipe_screen *screen,
    return fsa->winsys->displaytarget_get_handle(fsa->winsys, rsc->dt, handle);
 }
 
+static void
+init_allocator(uint64_t size)
+{
+   falloc_init(0, size, NULL);
+   /* Reserve space for text, data, bss */
+   /* Currently no check if the program exceed this size */
+   falloc_addr_malloc(0, 0x30000);
+   /* Reserve space for stack */
+   falloc_addr_malloc(0x20000000 - 0x100 * 64, 0x100 * 64);
+}
+
 struct pipe_screen *
 fsa_create_screen(struct sw_winsys *winsys)
 {
@@ -217,12 +255,14 @@ fsa_create_screen(struct sw_winsys *winsys)
       return NULL;
 
    fsa_llvm_riscv_init();
-   falloc_init(0, 0x40000000, false);
+   /* Emulator setup */
+   uint64_t emu_mem_size = 0x20000000ULL;
+   screen->emu = gfxemu_create(emu_mem_size, FSA_DEBUG & FSA_DEBUG_EMU_VS,
+                               FSA_DEBUG & FSA_DEBUG_EMU_FS);
+   init_allocator(emu_mem_size);
 
    fsa_init_screen_caps(screen);
    fsa_init_shader_caps(screen);
-
-   /* TODO: instantiate gfxemu */
 
    screen->winsys = winsys;
 

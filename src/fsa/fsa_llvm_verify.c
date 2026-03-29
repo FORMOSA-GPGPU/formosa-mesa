@@ -21,8 +21,8 @@
 #include "fsa_spike.S.h"
 #include "fsa_spike.ld.h"
 #include "fsa_spike_helper.h"
-#include "fsa_uscsim.S.h"
-#include "fsa_uscsim.ld.h"
+#include "fsa_uscsim_bench.S.h"
+#include "fsa_uscsim_bench.ld.h"
 #include "fsa_util.h"
 
 static LLVMValueRef
@@ -403,30 +403,6 @@ prepare_data_simt(uint32_t *output, uint32_t *input, uint32_t *golden,
    return;
 }
 
-/* Helper struct def */
-struct GfxLayout {
-   float *base;
-   uint64_t stride;
-};
-
-struct GfxState {
-   /* Vertex shader input */
-   struct GfxLayout vert_attrib_generic[16];
-   /* Vertex shader output, Fragment shader input */
-   struct GfxLayout varying_slot_pos[1];
-   struct GfxLayout varying_slot_tex[8];
-   struct GfxLayout varying_slot_var[32];
-   struct GfxLayout frag_result_data[8];
-   /* Visibility stream */
-   uint64_t *VisS_base;
-};
-
-struct GfxVSInfo {
-   struct GfxState *gfx_state;
-   uint32_t wg_id;
-   uint32_t wg_size;
-};
-
 /*
 MEMORY MAP (High -> Low)
 ========================
@@ -455,46 +431,41 @@ input: 0x8002000
 pos(output): 0x8003000
 */
 static void
-gfx_info_init(struct GfxVSInfo *info)
+gfx_info_init(GfxVSInfo *info)
 {
-   info->gfx_state = (struct GfxState *)0x8000100;
+   info->gfx_state_addr = 0x8000100;
    info->wg_id = 0;
    info->wg_size = 4;
 }
 
 static void
-gfx_state_init(struct GfxState *s, int op_type)
+gfx_state_init(GfxState *s, int op_type)
 {
    /* uint32_t input[3 * 4 * 4] */
    /* Only use Generic0-2 as input */
    uint64_t input_base = 0x8002000;
    uint64_t output_base = 0x8003000;
-   s->vert_attrib_generic[0].base = (float *)input_base;
+   s->vert_attrib_generic[0].base = input_base;
    s->vert_attrib_generic[0].stride = 4 * 4 * op_type;
-   s->vert_attrib_generic[1].base = (float *)(input_base + 4 * 4);
+   s->vert_attrib_generic[1].base = input_base + 4 * 4;
    s->vert_attrib_generic[1].stride = 4 * 4 * op_type;
-   s->vert_attrib_generic[2].base = (float *)(input_base + 4 * 4 * 2);
+   s->vert_attrib_generic[2].base = input_base + 4 * 4 * 2;
    s->vert_attrib_generic[2].stride = 4 * 4 * op_type;
    for (int i = 3; i < 16; i++) {
-      s->vert_attrib_generic[i].base = (float *)0xdeadbeef;
+      s->vert_attrib_generic[i].base = 0xdeadbeef;
       s->vert_attrib_generic[i].stride = 0xdeadbeef;
    }
    /* Pos */
-   s->varying_slot_pos[0].base = (float *)output_base;
+   s->varying_slot_pos[0].base = output_base;
    s->varying_slot_pos[0].stride = 4 * 4;
-   /* Tex */
-   for (int i = 0; i < 8; i++) {
-      s->varying_slot_tex[i].base = (float *)0xdeadbeef;
-      s->varying_slot_tex[i].stride = 0xdeadbeef;
-   }
    /* Var */
    for (int i = 0; i < 32; i++) {
-      s->varying_slot_var[i].base = (float *)0xdeadbeef;
+      s->varying_slot_var[i].base = 0xdeadbeef;
       s->varying_slot_var[i].stride = 0xdeadbeef;
    }
    /* Fres */
    for (int i = 0; i < 8; i++) {
-      s->frag_result_data[i].base = (float *)0xdeadbeef;
+      s->frag_result_data[i].base = 0xdeadbeef;
       s->frag_result_data[i].stride = 0xdeadbeef;
    }
    return;
@@ -540,14 +511,12 @@ fsa_llvm_verify_uscsim(LLVMModuleRef module, int op_type, int num_ele,
    prepare_data_simt(output, input, golden, op_type, num_ele, fn_golden);
 
    /* Set up required info and state */
-   struct GfxVSInfo vsinfo = {0};
-   struct GfxState gfxstate = {0};
+   GfxVSInfo vsinfo = {0};
+   GfxState gfxstate = {0};
    gfx_info_init(&vsinfo);
    gfx_state_init(&gfxstate, op_type);
-   uscsim_write_mem(usc, 0x8000000, sizeof(struct GfxVSInfo),
-                    (uint8_t *)&vsinfo);
-   uscsim_write_mem(usc, 0x8000100, sizeof(struct GfxState),
-                    (uint8_t *)&gfxstate);
+   uscsim_write_mem(usc, 0x8000000, sizeof(GfxVSInfo), (uint8_t *)&vsinfo);
+   uscsim_write_mem(usc, 0x8000100, sizeof(GfxState), (uint8_t *)&gfxstate);
    uscsim_write_mem(usc, 0x8002000, 3 * 4 * 4 * sizeof(uint32_t),
                     (uint8_t *)input);
 

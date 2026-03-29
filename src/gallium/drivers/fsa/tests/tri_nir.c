@@ -23,11 +23,11 @@
  *
  **************************************************************************/
 
-#define WIDTH  300
-#define HEIGHT 300
+#define WIDTH  640
+#define HEIGHT 480
 #define NEAR   0
 #define FAR    1
-#define FLIP   0
+#define FLIP   1
 
 /* pipe_*_state structs */
 #include "pipe/p_state.h"
@@ -77,6 +77,7 @@ struct program {
 
    struct pipe_resource *vbuf;
    struct pipe_resource *target;
+   struct pipe_resource *zbuf;
 };
 
 static void *
@@ -104,6 +105,7 @@ create_vs_nir(struct pipe_context *pipe)
    nir_variable *out_color = nir_variable_create(b.shader, nir_var_shader_out,
                                                  glsl_vec4_type(), "v_color");
    out_color->data.location = VARYING_SLOT_VAR0;
+   out_color->data.interpolation = INTERP_MODE_SMOOTH;
 
    nir_copy_var(&b, out_pos, in_pos);
    nir_copy_var(&b, out_color, in_color);
@@ -111,6 +113,7 @@ create_vs_nir(struct pipe_context *pipe)
    struct pipe_shader_state state = {0};
    state.type = PIPE_SHADER_IR_NIR;
    state.ir.nir = b.shader;
+   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
 
    return pipe->create_vs_state(pipe, &state);
 }
@@ -128,6 +131,7 @@ create_fs_nir(struct pipe_context *pipe)
    nir_variable *in_color = nir_variable_create(b.shader, nir_var_shader_in,
                                                 glsl_vec4_type(), "v_color");
    in_color->data.location = VARYING_SLOT_VAR0;
+   in_color->data.interpolation = INTERP_MODE_SMOOTH;
 
    nir_variable *out_color = nir_variable_create(
       b.shader, nir_var_shader_out, glsl_vec4_type(), "gl_FragColor");
@@ -138,6 +142,7 @@ create_fs_nir(struct pipe_context *pipe)
    struct pipe_shader_state state = {0};
    state.type = PIPE_SHADER_IR_NIR;
    state.ir.nir = b.shader;
+   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
 
    return pipe->create_fs_state(pipe, &state);
 }
@@ -221,6 +226,30 @@ init_prog(struct program *p)
    p->framebuffer.cbufs[0] =
       p->pipe->create_surface(p->pipe, p->target, &surf_tmpl);
 
+   /* depth buffer */
+   {
+      struct pipe_resource tmplt;
+      memset(&tmplt, 0, sizeof(tmplt));
+      tmplt.target = PIPE_TEXTURE_2D;
+      tmplt.format = PIPE_FORMAT_Z32_FLOAT;
+      tmplt.width0 = WIDTH;
+      tmplt.height0 = HEIGHT;
+      tmplt.depth0 = 1;
+      tmplt.array_size = 1;
+      tmplt.last_level = 0;
+      tmplt.bind = PIPE_BIND_DEPTH_STENCIL;
+
+      p->zbuf = p->screen->resource_create(p->screen, &tmplt);
+
+      struct pipe_surface zsurf_tmpl = {0};
+      zsurf_tmpl.format = PIPE_FORMAT_Z32_FLOAT;
+      zsurf_tmpl.u.tex.level = 0;
+      zsurf_tmpl.u.tex.first_layer = 0;
+      zsurf_tmpl.u.tex.last_layer = 0;
+      p->framebuffer.zsbuf =
+         p->pipe->create_surface(p->pipe, p->zbuf, &zsurf_tmpl);
+   }
+
    /* viewport, depth isn't really needed */
    {
       float x = 0;
@@ -285,7 +314,9 @@ close_prog(struct program *p)
    p->pipe->delete_fs_state(p->pipe, p->fs);
 
    pipe_surface_reference(&p->framebuffer.cbufs[0], NULL);
+   pipe_surface_reference(&p->framebuffer.zsbuf, NULL);
    pipe_resource_reference(&p->target, NULL);
+   pipe_resource_reference(&p->zbuf, NULL);
    pipe_resource_reference(&p->vbuf, NULL);
 
    p->pipe->destroy(p->pipe);
@@ -302,7 +333,8 @@ draw(struct program *p)
    cso_set_framebuffer(p->cso, &p->framebuffer);
 
    /* clear the render target */
-   p->pipe->clear(p->pipe, PIPE_CLEAR_COLOR, NULL, &p->clear_color, 0, 0);
+   p->pipe->clear(p->pipe, PIPE_CLEAR_COLOR | PIPE_CLEAR_DEPTH, NULL,
+                  &p->clear_color, 1.0, 0);
 
    /* set misc state we care about */
    cso_set_blend(p->cso, &p->blend);

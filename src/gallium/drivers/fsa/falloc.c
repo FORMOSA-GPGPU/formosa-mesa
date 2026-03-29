@@ -54,7 +54,7 @@ align(size_t n)
 }
 
 void
-falloc_init(uintptr_t start, size_t size, int log)
+falloc_init(uintptr_t start, size_t size, FILE *log)
 {
    /* Init full size free block */
    struct Block *temp = malloc(sizeof(*temp));
@@ -65,7 +65,7 @@ falloc_init(uintptr_t start, size_t size, int log)
    free_list.next = temp;
    /* Init log file */
    if (log) {
-      logf = fopen("log.json", "w");
+      logf = log;
       fprintf(logf, "[");
       fprintf(logf, "{");
       fprintf(logf, "\"start\": %ld,", start);

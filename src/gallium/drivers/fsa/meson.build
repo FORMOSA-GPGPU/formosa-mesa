@@ -17,14 +17,15 @@ libfsa = static_library(
     inc_mapi,
     inc_mesa,
     inc_gallium,
-    inc_gallium_aux
+    inc_gallium_aux,
   ],
-  dependencies : [idep_mesautil, idep_fsa_compiler],
+  dependencies : [idep_mesautil, idep_fsa_compiler, dep_uscsim],
 )
 
 driver_fsa = declare_dependency(
   compile_args : '-DGALLIUM_FSA',
   link_with : [libfsa],
+  dependencies : [dep_uscsim],
 )
 
 if with_tests

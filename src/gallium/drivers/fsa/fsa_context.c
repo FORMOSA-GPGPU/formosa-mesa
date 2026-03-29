@@ -1,4 +1,5 @@
 #include "fsa_context.h"
+#include "uscsim/cbind.h"
 #include "util/format/u_format.h"
 #include "util/u_framebuffer.h"
 #include "util/u_inlines.h"
@@ -9,14 +10,48 @@
 #include "fsa_emu_resource.h"
 #include "fsa_sampler_state.h"
 #include "fsa_sampler_view.h"
+#include "fsa_screen.h"
 #include "fsa_shader.h"
 #include "fsa_transfer.h"
+
+static void
+fsa_set_stream_output_targets(struct pipe_context *pctx, unsigned num_targets,
+                              struct pipe_stream_output_target **targets,
+                              const unsigned *offsets,
+                              enum mesa_prim rasterizer_prim)
+{
+   FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_set_stream_output_targets\n");
+}
 
 static void
 fsa_destroy_context(struct pipe_context *pctx)
 {
    FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_destroy_context\n");
    struct fsa_context *fctx = (struct fsa_context *)pctx;
+
+   for (unsigned i = 0; i < fctx->num_vertex_buffers; i++) {
+      if (!fctx->vertex_buffers[i].is_user_buffer) {
+         pipe_resource_reference(&fctx->vertex_buffers[i].buffer.resource,
+                                 NULL);
+      }
+   }
+
+   for (unsigned shader = 0; shader < PIPE_SHADER_TYPES; shader++) {
+      for (unsigned i = 0; i < PIPE_MAX_CONSTANT_BUFFERS; i++) {
+         pipe_resource_reference(&fctx->const_buffers[shader][i].buffer, NULL);
+      }
+      for (unsigned i = 0; i < PIPE_MAX_SHADER_SAMPLER_VIEWS; i++) {
+         pipe_sampler_view_reference(&fctx->sampler_views[shader][i], NULL);
+      }
+   }
+
+   pipe_resource_reference(&fctx->varying_scratch_buffer, NULL);
+   pipe_resource_reference(&fctx->viss_buffer, NULL);
+   pipe_resource_reference(&fctx->gfxstate_buffer, NULL);
+   pipe_resource_reference(&fctx->vsinfo_buffer, NULL);
+   pipe_resource_reference(&fctx->fsinfo_buffer, NULL);
+   pipe_resource_reference(&fctx->internal_fb_buffer, NULL);
+
    FREE(fctx);
 }
 
@@ -24,7 +59,8 @@ static void
 fsa_set_framebuffer_state(struct pipe_context *pctx,
                           const struct pipe_framebuffer_state *fb)
 {
-   FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_set_framebuffer_state\n");
+   FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_set_framebuffer_state: cbuf[0] fmt=%s\n",
+           fb->nr_cbufs ? util_format_name(fb->cbufs[0]->format) : "none");
    struct fsa_context *ctx = (struct fsa_context *)pctx;
    util_copy_framebuffer_state(&ctx->framebuffer, fb);
 }
@@ -273,12 +309,58 @@ fsa_surface_destroy(struct pipe_context *pctx, struct pipe_surface *surf)
    FREE(surf);
 }
 
+/* The hardware natively stores pixels in BGRA8888. */
+#define FSA_HW_FORMAT          PIPE_FORMAT_R8G8B8A8_UNORM
+#define FSA_HW_BYTES_PER_PIXEL 4u
+
 static void
 fsa_clear(struct pipe_context *pctx, unsigned buffers,
           const struct pipe_scissor_state *scissor_state,
           const union pipe_color_union *color, double depth, unsigned stencil)
 {
-   FSA_DBG(FSA_DEBUG_DRAW, "fsa_clear\n");
+   FSA_DBG(FSA_DEBUG_DRAW, "fsa_clear:depth %f\n", depth);
+   if (!(buffers & (PIPE_CLEAR_COLOR | PIPE_CLEAR_DEPTHSTENCIL)))
+      return;
+   struct fsa_context *fsa = fsa_context(pctx);
+   GfxEmu *emu = fsa_screen(fsa->base.screen)->emu;
+   /* Skip clear color if not set */
+   if (!(buffers & PIPE_CLEAR_COLOR)) {
+      goto check_depth_stencil;
+   }
+   uint8_t r = (uint8_t)(CLAMP(color->f[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+   uint8_t g = (uint8_t)(CLAMP(color->f[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+   uint8_t b = (uint8_t)(CLAMP(color->f[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+   uint8_t a = (uint8_t)(CLAMP(color->f[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+   /* Pack in hw native BGRA order */
+   uint8_t hw_pixel[FSA_HW_BYTES_PER_PIXEL] = {b, g, r, a};
+   for (unsigned i = 0; i < fsa->framebuffer.nr_cbufs; i++) {
+      if (!(buffers & (PIPE_CLEAR_COLOR0 << i)))
+         continue;
+      struct pipe_surface *surf = fsa->framebuffer.cbufs[i];
+      if (!surf)
+         continue;
+      struct fsa_emu_resource *rsc = fsa_emu_resource(surf->texture);
+      for (int i = 0; i < surf->width * surf->height; i++) {
+         gfxemu_write_mem(emu, rsc->dmem_offset + i * FSA_HW_BYTES_PER_PIXEL,
+                          FSA_HW_BYTES_PER_PIXEL, hw_pixel);
+      }
+   }
+/* Ignoring stencil now */
+check_depth_stencil:
+   if (!(buffers & PIPE_CLEAR_DEPTH))
+      return;
+   union {
+      float f;
+      uint32_t i;
+   } f2i = {.f = depth};
+   struct pipe_surface *surf = fsa->framebuffer.zsbuf;
+   if (!surf)
+      return;
+   struct fsa_emu_resource *rsc = fsa_emu_resource(surf->texture);
+   for (int i = 0; i < surf->width * surf->height; i++) {
+      gfxemu_write_mem(emu, rsc->dmem_offset + i * sizeof(f2i.i), sizeof(f2i.i),
+                       (uint8_t *)&f2i.i);
+   }
 }
 
 static void
@@ -367,7 +449,11 @@ fsa_create_vertex_elements_state(struct pipe_context *pctx,
                                  const struct pipe_vertex_element *elements)
 {
    FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_create_vertex_elements_state\n");
-   return mem_dup(elements, num_elements * sizeof(*elements));
+   struct fsa_vertex_element_state *state =
+      CALLOC_STRUCT(fsa_vertex_element_state);
+   state->count = num_elements;
+   state->elements = mem_dup(elements, num_elements * sizeof(*elements));
+   return state;
 }
 
 static void
@@ -375,47 +461,15 @@ fsa_bind_vertex_elements_state(struct pipe_context *pctx, void *hwcso)
 {
    FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_bind_vertex_elements_state\n");
    struct fsa_context *fctx = (struct fsa_context *)pctx;
-   fctx->velems = hwcso;
+   fctx->velem_state = hwcso;
 }
 
 static void
 fsa_delete_vertex_elements_state(struct pipe_context *pctx, void *hwcso)
 {
    FSA_DBG(FSA_DEBUG_CONTEXT, "fsa_delete_vertex_elements_state\n");
-   FREE(hwcso);
-}
-
-static void
-fsa_bind_vs_state(struct pipe_context *pctx, void *hwcso)
-{
-   FSA_DBG(FSA_DEBUG_SHADER, "fsa_bind_vs_state\n");
-   struct fsa_context *fctx = (struct fsa_context *)pctx;
-   fctx->vs = hwcso;
-}
-
-static void
-fsa_delete_vs_state(struct pipe_context *pctx, void *hwcso)
-{
-   FSA_DBG(FSA_DEBUG_SHADER, "fsa_delete_vs_state\n");
-   struct fsa_shader_state *state = fsa_shader_state(hwcso);
-   free(state->compiled_bin);
-   FREE(hwcso);
-}
-
-static void
-fsa_bind_fs_state(struct pipe_context *pctx, void *hwcso)
-{
-   FSA_DBG(FSA_DEBUG_SHADER, "fsa_bind_fs_state\n");
-   struct fsa_context *fctx = (struct fsa_context *)pctx;
-   fctx->fs = hwcso;
-}
-
-static void
-fsa_delete_fs_state(struct pipe_context *pctx, void *hwcso)
-{
-   FSA_DBG(FSA_DEBUG_SHADER, "fsa_delete_fs_state\n");
-   struct fsa_shader_state *state = fsa_shader_state(hwcso);
-   free(state->compiled_bin);
+   struct fsa_vertex_element_state *state = fsa_vertex_element_state(hwcso);
+   FREE(state->elements);
    FREE(hwcso);
 }
 
@@ -425,6 +479,8 @@ fsa_buffer_map(struct pipe_context *ctx, struct pipe_resource *resource,
                struct pipe_transfer **out_transfer)
 {
    FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_buffer_map\n");
+   struct fsa_context *fsa = fsa_context(ctx);
+   struct GfxEmu *emu = fsa_screen(fsa->base.screen)->emu;
    struct fsa_emu_resource *rsc = fsa_emu_resource(resource);
    struct fsa_transfer *trans = CALLOC_STRUCT(fsa_transfer);
    if (!trans)
@@ -444,7 +500,7 @@ fsa_buffer_map(struct pipe_context *ctx, struct pipe_resource *resource,
 
    if (usage & PIPE_MAP_READ) {
       uint64_t addr = rsc->dmem_offset + box->x;
-      /* TODO: Read from gfxemu ifmem */
+      gfxemu_read_mem(emu, trans->staging, addr, box->width);
    }
 
    *out_transfer = &trans->base;
@@ -455,11 +511,13 @@ static void
 fsa_buffer_unmap(struct pipe_context *ctx, struct pipe_transfer *transfer)
 {
    FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_buffer_unmap\n");
+   struct fsa_context *fsa = fsa_context(ctx);
+   struct GfxEmu *emu = fsa_screen(fsa->base.screen)->emu;
    struct fsa_transfer *trans = fsa_transfer(transfer);
    struct fsa_emu_resource *rsc = fsa_emu_resource(trans->base.resource);
    if (trans->base.usage & PIPE_MAP_WRITE) {
       uint64_t addr = rsc->dmem_offset + trans->base.box.x;
-      /* TODO: Write to gfxemu ifmem */
+      gfxemu_write_mem(emu, addr, trans->base.box.width, trans->staging);
    }
    FREE(trans->staging);
    FREE(trans);
@@ -480,6 +538,10 @@ fsa_texture_map(struct pipe_context *ctx, struct pipe_resource *prsc,
                 struct pipe_transfer **out_transfer)
 {
    FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_texture_map\n");
+   FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_texture_map: fmt=%s\n",
+           util_format_name(prsc->format));
+   struct fsa_context *fsa = fsa_context(ctx);
+   struct GfxEmu *emu = fsa_screen(fsa->base.screen)->emu;
    struct fsa_emu_resource *rsc = fsa_emu_resource(prsc);
    struct fsa_transfer *trans = CALLOC_STRUCT(fsa_transfer);
    if (!trans)
@@ -500,10 +562,13 @@ fsa_texture_map(struct pipe_context *ctx, struct pipe_resource *prsc,
       FREE(trans);
    }
 
-   /* Copy to staging buffer */
+   /* Copy to staging buffer, translating from hw native BGRA if needed */
    if (usage & PIPE_MAP_READ) {
-      uint64_t vram_stride = rsc->base.width0 * bytes_per_pixel;
+      bool needs_convert = prsc->format != FSA_HW_FORMAT;
+      uint64_t vram_stride = rsc->base.width0 * FSA_HW_BYTES_PER_PIXEL;
+      unsigned hw_row_bytes = box->width * FSA_HW_BYTES_PER_PIXEL;
 
+      uint8_t *hw_row_buf = needs_convert ? MALLOC(hw_row_bytes) : NULL;
       uint8_t *dst = (uint8_t *)trans->staging;
 
       for (uint64_t z = box->z; z < box->depth; z++) {
@@ -512,13 +577,21 @@ fsa_texture_map(struct pipe_context *ctx, struct pipe_resource *prsc,
             uint64_t vram_row_offset =
                (z * (vram_stride * rsc->base.height0)) + // Z offset
                (y * vram_stride) +                       // Y offset
-               (box->x * bytes_per_pixel);               // X offset
+               (box->x * FSA_HW_BYTES_PER_PIXEL);        // X offset
 
             uint64_t addr = rsc->dmem_offset + vram_row_offset;
-            /* TODO: Copy one row from vram, size=trans->base.stride */
+            if (needs_convert) {
+               gfxemu_read_mem(emu, hw_row_buf, addr, hw_row_bytes);
+               util_format_translate(prsc->format, dst, trans->base.stride, 0,
+                                     0, FSA_HW_FORMAT, hw_row_buf, hw_row_bytes,
+                                     0, 0, box->width, 1);
+            } else {
+               gfxemu_read_mem(emu, dst, addr, trans->base.stride);
+            }
             dst += trans->base.stride;
          }
       }
+      FREE(hw_row_buf);
    }
    *out_transfer = &trans->base;
    return trans->staging;
@@ -528,13 +601,19 @@ static void
 fsa_texture_unmap(struct pipe_context *ctx, struct pipe_transfer *transfer)
 {
    FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_texture_unmap\n");
+   struct fsa_context *fsa = fsa_context(ctx);
+   struct GfxEmu *emu = fsa_screen(fsa->base.screen)->emu;
    struct fsa_transfer *trans = fsa_transfer(transfer);
    struct fsa_emu_resource *rsc = fsa_emu_resource(trans->base.resource);
 
    if (transfer->usage & PIPE_MAP_WRITE) {
-      unsigned bpp = util_format_get_blocksize(transfer->resource->format);
-      uint64_t vram_stride = transfer->resource->width0 * bpp;
+      bool needs_convert = transfer->resource->format != FSA_HW_FORMAT;
+      uint64_t vram_stride =
+         transfer->resource->width0 * FSA_HW_BYTES_PER_PIXEL;
+      unsigned hw_row_bytes = transfer->box.width * FSA_HW_BYTES_PER_PIXEL;
       uint8_t *src = (uint8_t *)trans->staging;
+
+      uint8_t *hw_row_buf = needs_convert ? MALLOC(hw_row_bytes) : NULL;
 
       for (uint64_t z = transfer->box.z; z < transfer->box.depth; z++) {
          for (uint64_t y = transfer->box.y; y < transfer->box.height; y++) {
@@ -542,17 +621,70 @@ fsa_texture_unmap(struct pipe_context *ctx, struct pipe_transfer *transfer)
             uint64_t vram_row_offset =
                (z * (vram_stride * transfer->resource->height0)) + // Z offset
                (y * vram_stride) +                                 // Y offset
-               (transfer->box.x * bpp);                            // X offset
+               (transfer->box.x * FSA_HW_BYTES_PER_PIXEL);         // X offset
 
             uint64_t addr = rsc->dmem_offset + vram_row_offset;
-            /* TODO: Copy to vram , size = trans->base.stride */
+            if (needs_convert) {
+               util_format_translate(FSA_HW_FORMAT, hw_row_buf, hw_row_bytes, 0,
+                                     0, transfer->resource->format, src,
+                                     trans->base.stride, 0, 0,
+                                     transfer->box.width, 1);
+               gfxemu_write_mem(emu, addr, hw_row_bytes, hw_row_buf);
+            } else {
+               gfxemu_write_mem(emu, addr, trans->base.stride, src);
+            }
             src += trans->base.stride;
          }
       }
+      FREE(hw_row_buf);
    }
 
    FREE(trans->staging);
    FREE(trans);
+}
+
+static void
+fsa_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit)
+{
+   FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_blit\n");
+   FSA_DBG(FSA_DEBUG_RESOURCE, "fsa_blit: src=%s dst=%s\n",
+           util_format_name(blit->src.format),
+           util_format_name(blit->dst.format));
+   struct fsa_context *fsa = fsa_context(pctx);
+   struct GfxEmu *emu = fsa_screen(fsa->base.screen)->emu;
+
+   struct fsa_emu_resource *src_rsc = fsa_emu_resource(blit->src.resource);
+   struct fsa_emu_resource *dst_rsc = fsa_emu_resource(blit->dst.resource);
+
+   unsigned bpp = util_format_get_blocksize(blit->src.format);
+   uint64_t src_stride = blit->src.resource->width0 * bpp;
+   uint64_t dst_stride = blit->dst.resource->width0 * bpp;
+   int blit_width = blit->src.box.width;
+   int blit_height = blit->src.box.height;
+   bool invert_y = blit_height < 0;
+   if (invert_y)
+      blit_height = -blit_height;
+   uint64_t row_bytes = blit_width * bpp;
+
+   uint8_t *row_buf = MALLOC(row_bytes);
+   if (!row_buf)
+      return;
+
+   for (int row = 0; row < blit_height; row++) {
+      int src_y =
+         invert_y ? (blit->src.box.y - 1 - row) : (blit->src.box.y + row);
+      int dst_y = blit->dst.box.y + row;
+
+      uint64_t src_addr =
+         src_rsc->dmem_offset + src_y * src_stride + blit->src.box.x * bpp;
+      uint64_t dst_addr =
+         dst_rsc->dmem_offset + dst_y * dst_stride + blit->dst.box.x * bpp;
+
+      gfxemu_read_mem(emu, row_buf, src_addr, row_bytes);
+      gfxemu_write_mem(emu, dst_addr, row_bytes, row_buf);
+   }
+
+   FREE(row_buf);
 }
 
 static void
@@ -572,6 +704,10 @@ fsa_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    struct fsa_context *fctx = CALLOC_STRUCT(fsa_context);
    if (!fctx)
       return NULL;
+
+   fctx->varying_scratch_buffer = NULL;
+   fctx->varying_scratch_buffer_size = 0;
+   fctx->viss_buffer = NULL;
 
    fctx->base.screen = screen;
    fctx->base.priv = priv;
@@ -599,6 +735,7 @@ fsa_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    fctx->base.set_shader_buffers = fsa_set_shader_buffers;
    fctx->base.set_shader_images = fsa_set_shader_images;
    fctx->base.set_stencil_ref = fsa_set_stencil_ref;
+   fctx->base.set_stream_output_targets = fsa_set_stream_output_targets;
 
    /* Sampler State */
    fctx->base.create_sampler_state = fsa_create_sampler_state;
@@ -649,6 +786,7 @@ fsa_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    fctx->base.texture_map = fsa_texture_map;
    fctx->base.texture_unmap = fsa_texture_unmap;
    fctx->base.texture_subdata = fsa_texture_subdata;
+   fctx->base.blit = fsa_blit;
 
    return &fctx->base;
 }

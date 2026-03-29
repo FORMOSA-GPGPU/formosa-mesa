@@ -1,5 +1,5 @@
 [wrap-git]
 url = git@git.caslab.ee.ncku.edu.tw:formosa-gpgpu/formosa.git
-revision = d88472d009faf3723e91a67fa0b5a85d7bd90583
+revision = c5395eb5cb9f884da20225abfb36086b2329b34b
 clone-recursive = true
 patch_directory = formosa
