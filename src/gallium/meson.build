@@ -59,7 +59,16 @@ if with_any_llvmpipe
 else
   driver_llvmpipe = declare_dependency()
 endif
-if with_any_llvmpipe and with_gallium_softpipe
+if with_gallium_formosa
+  subdir('drivers/fsa')
+else
+  driver_fsa = declare_dependency()
+endif
+if with_gallium_formosa and with_gallium_softpipe
+  driver_swrast = declare_dependency(
+    dependencies : [ driver_softpipe, driver_fsa ],
+  )
+elif with_any_llvmpipe and with_gallium_softpipe
   driver_swrast = declare_dependency(
     dependencies : [ driver_softpipe, driver_llvmpipe ],
   )

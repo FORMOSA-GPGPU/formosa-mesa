@@ -50,6 +50,8 @@ fsa_nir_lower_to_submit(nir_shader *shader)
    nir_builder b = nir_builder_create(impl);
    nir_block *last_bb = nir_impl_last_block(impl);
 
+   b.cursor = nir_after_block(last_bb);
+
    /* Find color, depth store instr */
    nir_intrinsic_instr *store_color = find_store_to_color(last_bb);
    nir_intrinsic_instr *store_depth = find_store_to_depth(last_bb);
@@ -66,11 +68,8 @@ fsa_nir_lower_to_submit(nir_shader *shader)
       nir_def *v4f_rounded = nir_fround_even(&b, v4f_scaled);
       nir_def *v4i32_color = nir_f2u32(&b, v4f_rounded);
       nir_def *v4i8_color = nir_u2u8(&b, v4i32_color);
-      /* Before swizzle, the vector format is RGBA. We must convert to BGRA */
-      unsigned swiz[4] = {2, 1, 0, 3};
-      nir_def *v4i8_color_swiz = nir_swizzle(&b, v4i8_color, swiz, 4);
-      /* nir_pack then makes it ARGB in uint32_t */
-      i32_color = nir_pack_32_4x8(&b, v4i8_color_swiz);
+      /* vec: RGBA, nir_pack then makes it ABGR in uint32_t */
+      i32_color = nir_pack_32_4x8(&b, v4i8_color);
 
       nir_instr_remove((nir_instr *)store_color);
    } else {

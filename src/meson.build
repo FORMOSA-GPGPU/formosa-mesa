@@ -108,6 +108,9 @@ endif
 if with_gallium
   subdir('mesa')
 endif
+if with_gallium_formosa
+  subdir('fsa')
+endif
 if with_gallium_or_lvp
   subdir('gallium')
 endif
@@ -157,7 +160,3 @@ if with_glx != 'disabled' and not with_glvnd
 endif
 
 subdir('tool')
-
-if with_gallium_formosa
-  subdir('fsa')
-endif
