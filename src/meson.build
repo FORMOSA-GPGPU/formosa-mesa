@@ -111,7 +111,7 @@ endif
 if with_gallium_formosa
   subdir('formosa')
 endif
-if with_tools.contains('fsa-compute')
+if with_tools.contains('fsa-compute') or with_formosa_vk
   subdir('formosa/compute')
 endif
 if with_gallium_or_lvp

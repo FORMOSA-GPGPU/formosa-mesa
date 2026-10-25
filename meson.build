@@ -271,6 +271,7 @@ with_microsoft_vk = _vulkan_drivers.contains('microsoft-experimental')
 with_nouveau_vk = _vulkan_drivers.contains('nouveau')
 with_asahi_vk = _vulkan_drivers.contains('asahi')
 with_gfxstream_vk = _vulkan_drivers.contains('gfxstream')
+with_formosa_vk = _vulkan_drivers.contains('formosa')
 with_any_vk = _vulkan_drivers.length() != 0
 
 if with_any_vk and host_machine.system() == 'windows' and meson.version().version_compare('< 1.3')
@@ -1811,7 +1812,7 @@ if _llvm.allowed()
     optional_modules : llvm_optional_modules,
     required : (
       with_amd_vk or with_gallium_radeonsi or with_gallium_clover or with_clc
-      or _llvm.enabled() or with_gallium_formosa
+      or _llvm.enabled() or with_gallium_formosa or with_formosa_vk
     ),
     static : not _shared_llvm,
     fallback : ['llvm', 'dep_llvm'],
