@@ -109,7 +109,7 @@ if with_gallium
   subdir('mesa')
 endif
 if with_gallium_formosa
-  subdir('fsa')
+  subdir('formosa')
 endif
 if with_gallium_or_lvp
   subdir('gallium')

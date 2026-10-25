@@ -8,5 +8,5 @@ src/amd/vulkan/**/*
 src/amd/compiler/**/*
 src/egl/**/*
 src/etnaviv/isa/**/*
-src/fsa/**/*
-src/gallium/drivers/fsa/**/*
+src/formosa/**/*
+src/gallium/drivers/formosa/**/*
