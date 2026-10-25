@@ -811,6 +811,17 @@ vtn_handle_non_semantic_instruction(struct vtn_builder *b, SpvOp ext_opcode,
 }
 
 static bool
+vtn_handle_debug_printf(struct vtn_builder *b, SpvOp opcode,
+                         const uint32_t *words, unsigned count)
+{
+   if (b->options->printf) {
+      vtn_fail_if(count < 6 || words[4] != 1, "Invalid NonSemantic.DebugPrintf instruction");
+      vtn_handle_printf(b, words[4], words + 5, count - 5, words + 1);
+   }
+   return true;
+}
+
+static bool
 vtn_handle_non_semantic_debug_break_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                                 const uint32_t *w, unsigned count)
 {
@@ -872,6 +883,8 @@ vtn_handle_extension(struct vtn_builder *b, SpvOp opcode,
       } else if ((strcmp(ext, "NonSemantic.Shader.DebugInfo.100") == 0)
                 && (b->options && b->options->debug_info)) {
          val->ext_handler = vtn_handle_non_semantic_debug_info;
+      } else if (strcmp(ext, "NonSemantic.DebugPrintf") == 0) {
+         val->ext_handler = vtn_handle_debug_printf;
       } else if (strstr(ext, "NonSemantic.") == ext) {
          val->ext_handler = vtn_handle_non_semantic_instruction;
       } else {
