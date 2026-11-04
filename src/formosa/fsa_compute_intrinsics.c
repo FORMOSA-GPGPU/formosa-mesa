@@ -117,17 +117,9 @@ memory_fence(struct fsa_llvm_context *ctx, bool barrier)
 
 /* Masks change at divergent control flow and clocks advance during execution.
  * Unlike geometry CSRs, these reads cannot be merged, hoisted or duplicated. */
-static LLVMValueRef
-read_live_csr(struct fsa_llvm_context *ctx, const char *csr)
+static void
+convergent_call(struct fsa_llvm_context *ctx, LLVMValueRef call)
 {
-   LLVMTypeRef type = LLVMFunctionType(ctx->i64, NULL, 0, false);
-   char code[64], constraints[] = "=r,~{memory}";
-   snprintf(code, sizeof(code), "csrr $0, %s", csr);
-   LLVMValueRef assembly = LLVMGetInlineAsm(
-      type, code, strlen(code), constraints, strlen(constraints), true, false,
-      LLVMInlineAsmDialectATT, false);
-   LLVMValueRef call =
-      LLVMBuildCall2(ctx->builder, type, assembly, NULL, 0, "");
    const char *attributes[] = {"convergent", "noduplicate"};
    for (unsigned i = 0; i < 2; i++)
       LLVMAddCallSiteAttribute(
@@ -136,7 +128,77 @@ read_live_csr(struct fsa_llvm_context *ctx, const char *csr)
                                  LLVMGetEnumAttributeKindForName(
                                     attributes[i], strlen(attributes[i])),
                                  0));
+}
+
+static LLVMValueRef
+live_assembly(struct fsa_llvm_context *ctx, LLVMTypeRef type, char *code,
+              char *constraints, LLVMValueRef *args, unsigned count)
+{
+   LLVMValueRef assembly = LLVMGetInlineAsm(
+      type, code, strlen(code), constraints, strlen(constraints), true, false,
+      LLVMInlineAsmDialectATT, false);
+   LLVMValueRef call =
+      LLVMBuildCall2(ctx->builder, type, assembly, args, count, "");
+   convergent_call(ctx, call);
    return call;
+}
+
+static LLVMValueRef
+read_live_csr(struct fsa_llvm_context *ctx, const char *csr)
+{
+   LLVMTypeRef type = LLVMFunctionType(ctx->i64, NULL, 0, false);
+   char code[64], constraints[] = "=r,~{memory}";
+   snprintf(code, sizeof(code), "csrr $0, %s", csr);
+   return live_assembly(ctx, type, code, constraints, NULL, 0);
+}
+
+/* Keep the diamond opaque to if-conversion. Its raised priority keeps the
+ * entry cohort together until both predicate paths reach the balanced lower.
+ * Return {entry mask, true mask}; false lanes recover true = entry ^ false. */
+static LLVMValueRef
+ballot(struct fsa_llvm_context *ctx, LLVMValueRef predicate)
+{
+   LLVMTypeRef fields[] = {ctx->i64, ctx->i64};
+   LLVMTypeRef pair = LLVMStructTypeInContext(ctx->context, fields, 2, false);
+   if (LLVMIsAConstantInt(predicate)) {
+      LLVMValueRef mask = read_live_csr(ctx, "0xfc2");
+      LLVMValueRef value = LLVMBuildInsertValue(
+         ctx->builder, LLVMGetUndef(pair), mask, 0, "");
+      return LLVMBuildInsertValue(ctx->builder, value,
+         LLVMConstIntGetZExtValue(predicate) ? mask : ctx->i64_0, 1, "");
+   }
+   LLVMTypeRef type = LLVMFunctionType(pair, &ctx->i64, 1, false);
+   char code[] =
+      "fsa.pri.raise.n 1\n\t"
+      "csrr $0, 0xfc2\n\t"
+      "beqz $2, 1f\n\t"
+      "csrr $1, 0xfc2\n\t"
+      "j 2f\n"
+      "1:\n\tcsrr $1, 0xfc2\n\txor $1, $0, $1\n"
+      "2:\n\tfsa.pri.lower.n 1";
+   char constraints[] = "=&r,=&r,r,~{memory}";
+   LLVMValueRef arg = LLVMBuildZExt(ctx->builder, predicate, ctx->i64, "");
+   return live_assembly(ctx, type, code, constraints, &arg, 1);
+}
+
+/* Reconstruct the selected lane's value using the existing ballot operation. */
+static LLVMValueRef
+broadcast(struct fsa_llvm_context *ctx, LLVMValueRef value, LLVMValueRef selected,
+          unsigned bits)
+{
+   LLVMValueRef result = ctx->i64_0;
+   for (unsigned bit = 0; bit < bits; bit++) {
+      LLVMValueRef flag = LLVMConstInt(ctx->i64, UINT64_C(1) << bit, false);
+      LLVMValueRef predicate = LLVMBuildICmp(ctx->builder, LLVMIntNE,
+         LLVMBuildAnd(ctx->builder, value, flag, ""), ctx->i64_0, "");
+      LLVMValueRef mask = LLVMBuildExtractValue(ctx->builder,
+         ballot(ctx, predicate), 1, "");
+      LLVMValueRef set = LLVMBuildICmp(ctx->builder, LLVMIntNE,
+         LLVMBuildAnd(ctx->builder, mask, selected, ""), ctx->i64_0, "");
+      result = LLVMBuildOr(ctx->builder, result,
+         LLVMBuildSelect(ctx->builder, set, flag, ctx->i64_0, ""), "");
+   }
+   return result;
 }
 
 /* Coherent subword stores share a 32-bit AMO word with neighboring array
@@ -574,6 +636,38 @@ fsa_compute_emit_intrinsic(struct fsa_llvm_context *ctx,
       offset_src = UINT32_MAX;
       store = true;
       break;
+   case nir_intrinsic_ballot:
+   case nir_intrinsic_vote_any:
+   case nir_intrinsic_vote_all: {
+      LLVMValueRef pair = ballot(ctx, src[0]);
+      LLVMValueRef mask = LLVMBuildExtractValue(ctx->builder, pair, 1, "");
+      if (instr->intrinsic == nir_intrinsic_ballot)
+         *result = mask;
+      else
+         *result = LLVMBuildICmp(ctx->builder,
+            instr->intrinsic == nir_intrinsic_vote_any ? LLVMIntNE : LLVMIntEQ,
+            mask, instr->intrinsic == nir_intrinsic_vote_any ? ctx->i64_0 :
+               LLVMBuildExtractValue(ctx->builder, pair, 0, ""), "");
+      return true;
+   }
+   case nir_intrinsic_read_first_invocation:
+   case nir_intrinsic_read_invocation: {
+      LLVMValueRef selected;
+      if (instr->intrinsic == nir_intrinsic_read_first_invocation) {
+         LLVMValueRef mask = read_live_csr(ctx, "0xfc2");
+         selected = LLVMBuildAnd(ctx->builder, mask,
+            LLVMBuildNeg(ctx->builder, mask, ""), "");
+      } else {
+         selected = LLVMBuildShl(ctx->builder, ctx->i64_1,
+            LLVMBuildZExt(ctx->builder, src[1], ctx->i64, ""), "");
+      }
+      LLVMValueRef value = broadcast(ctx,
+         LLVMBuildZExtOrBitCast(ctx->builder, src[0], ctx->i64, ""), selected,
+         LLVMGetIntTypeWidth(LLVMTypeOf(src[0])));
+      *result = LLVMBuildTruncOrBitCast(ctx->builder, value,
+                                      LLVMTypeOf(src[0]), "");
+      return true;
+   }
    case nir_intrinsic_elect: {
       LLVMValueRef mask = read_live_csr(ctx, "0xfc2");
       LLVMValueRef lane = fsa_build_csr_read(ctx, "xlaneid");

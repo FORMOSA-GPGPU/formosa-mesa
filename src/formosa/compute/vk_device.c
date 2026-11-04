@@ -141,7 +141,8 @@ enumerate_physical(struct vk_instance *instance)
             "Formosa compute (experimental)");
    p->subgroupSize = physical->description.threads_per_warp;
    p->subgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
-   p->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+   p->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
+      VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT;
    p->timestampPeriod = 1.0f;
    p->timestampComputeAndGraphics = true;
    p->maxTexelBufferElements = physical->description.max_allocation_size / 16;

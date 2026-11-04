@@ -65,6 +65,41 @@ prepare_nir(nir_shader *nir)
    NIR_PASS_V(nir, nir_inline_functions);
    nir_remove_non_entrypoints(nir);
    NIR_PASS_V(nir, nir_lower_system_values);
+   NIR_PASS_V(nir, nir_split_var_copies);
+   NIR_PASS_V(nir, nir_lower_var_copies);
+   NIR_PASS_V(nir, nir_lower_continue_constructs);
+   /* Preserve ordered NaN comparisons before constant votes fold to true. */
+   const nir_lower_subgroups_options vote_options = {
+      .ballot_bit_size = 32,
+      .ballot_components = 4,
+      .lower_vote_eq = true,
+      .lower_vote_bool_eq = true,
+   };
+   NIR_PASS_V(nir, nir_lower_subgroups, &vote_options);
+   bool normalized;
+   do {
+      normalized = false;
+      NIR_PASS(normalized, nir, nir_opt_deref);
+      NIR_PASS(normalized, nir, nir_lower_vars_to_ssa);
+      NIR_PASS(normalized, nir, nir_copy_prop);
+      NIR_PASS(normalized, nir, nir_opt_constant_folding);
+      NIR_PASS(normalized, nir, nir_opt_algebraic);
+      NIR_PASS(normalized, nir, nir_opt_dead_cf);
+      NIR_PASS(normalized, nir, nir_opt_if, 0);
+      NIR_PASS(normalized, nir, nir_opt_loop);
+      NIR_PASS(normalized, nir, nir_opt_loop_unroll);
+      NIR_PASS(normalized, nir, nir_opt_peephole_select, 16, false, false);
+      NIR_PASS(normalized, nir, nir_opt_dce);
+   } while (normalized);
+   const nir_lower_subgroups_options subgroup_options = {
+      .ballot_bit_size = 64,
+      .ballot_components = 1,
+      .lower_to_scalar = true,
+      .lower_subgroup_masks = true,
+      .lower_inverse_ballot = true,
+      .lower_first_invocation_to_ballot = true,
+   };
+   NIR_PASS_V(nir, nir_lower_subgroups, &subgroup_options);
    const nir_lower_tex_options tex_options = {.lower_txp = ~0u};
    NIR_PASS_V(nir, nir_lower_tex, &tex_options);
    const nir_lower_printf_options printf_options = {
@@ -104,7 +139,6 @@ prepare_nir(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_constant_folding);
    } while (progress);
    NIR_PASS_V(nir, nir_lower_load_const_to_scalar);
-   NIR_PASS_V(nir, nir_lower_continue_constructs);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    nir_validate_shader(nir, "Formosa compute");
 }
@@ -117,6 +151,22 @@ write_bytes(const char *path, const void *data, size_t size)
       return false;
    bool ok = fwrite(data, 1, size, file) == size;
    return fclose(file) == 0 && ok;
+}
+
+static bool
+optimize_module(struct fsa_llvm_context *ctx)
+{
+   LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+   LLVMErrorRef error =
+      LLVMRunPasses(ctx->module, "globaldce,default<O2>", NULL, options);
+   LLVMDisposePassBuilderOptions(options);
+   if (error) {
+      char *message = LLVMGetErrorMessage(error);
+      fprintf(stderr, "Formosa compute: %s\n", message);
+      LLVMDisposeErrorMessage(message);
+      return false;
+   }
+   return true;
 }
 
 static bool
@@ -161,16 +211,6 @@ link_device_library(struct fsa_llvm_context *ctx)
         g = LLVMGetNextGlobal(g))
       if (!LLVMIsDeclaration(g))
          LLVMSetLinkage(g, LLVMInternalLinkage);
-   LLVMPassBuilderOptionsRef pass_options = LLVMCreatePassBuilderOptions();
-   LLVMErrorRef error =
-      LLVMRunPasses(ctx->module, "globaldce,default<O2>", NULL, pass_options);
-   LLVMDisposePassBuilderOptions(pass_options);
-   if (error) {
-      char *text = LLVMGetErrorMessage(error);
-      fprintf(stderr, "Formosa compute: %s\n", text);
-      LLVMDisposeErrorMessage(text);
-      return false;
-   }
    return true;
 }
 
@@ -222,7 +262,9 @@ fsa_compute_compile(const uint32_t *words, size_t word_count, const char *entry,
       LLVMBasicBlockRef block = LLVMGetInsertBlock(ctx.builder);
       if (!LLVMGetBasicBlockTerminator(block))
          LLVMBuildRetVoid(ctx.builder);
-      ok = link_device_library(&ctx) && fsa_llvm_verify_module(ctx.module) == 0;
+      ok = link_device_library(&ctx) && optimize_module(&ctx);
+      if (ok)
+         ok = fsa_llvm_verify_module(ctx.module) == 0;
    }
    if (getenv("FSA_COMPUTE_DUMP_LLVM"))
       LLVMPrintModuleToFile(ctx.module, getenv("FSA_COMPUTE_DUMP_LLVM"), NULL);
