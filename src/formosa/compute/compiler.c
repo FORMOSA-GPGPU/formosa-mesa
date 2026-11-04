@@ -350,6 +350,15 @@ fsa_compute_compile(const uint32_t *words, size_t word_count, const char *entry,
       if (file)
          fclose(file);
    }
+   const char *dump = getenv("FSA_COMPUTE_DUMP_ELF");
+   if (ok && dump) {
+      char *path = ralloc_asprintf(NULL, "%s/%s.elf", dump,
+                                  strrchr(directory, '/') + 1);
+      ok = path && write_bytes(path, binary->data, binary->size);
+      if (!ok)
+         fprintf(stderr, "Formosa compute: cannot dump ELF to %s\n", dump);
+      ralloc_free(path);
+   }
    unlink(shader_path);
    unlink(start_path);
    unlink(elf_path);
