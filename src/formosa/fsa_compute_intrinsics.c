@@ -42,19 +42,6 @@ buffer_member(struct fsa_llvm_context *ctx, LLVMValueRef index, unsigned member)
 }
 
 static LLVMValueRef
-base_group(struct fsa_llvm_context *ctx, unsigned component)
-{
-   return LLVMBuildLoad2(
-      ctx->builder, ctx->i32,
-      byte_offset(
-         ctx, args_ptr(ctx),
-         LLVMConstInt(
-            ctx->i64,
-            offsetof(struct fsa_compute_args, base_group) + component * 4, 0)),
-      "");
-}
-
-static LLVMValueRef
 scratch_ptr(struct fsa_llvm_context *ctx)
 {
    LLVMValueRef group = wg_load(ctx, 0xc, ctx->i32);
@@ -662,9 +649,7 @@ fsa_compute_emit_intrinsic(struct fsa_llvm_context *ctx,
             values[i] = LLVMBuildAdd(
                ctx->builder, invocation_id(ctx, i),
                LLVMBuildMul(ctx->builder, wg_load(ctx, 0x10 + i * 4, ctx->i32),
-                            LLVMBuildAdd(ctx->builder,
-                                         wg_load(ctx, 0x4 + i * 4, ctx->i32),
-                                         base_group(ctx, i), ""),
+                            wg_load(ctx, 0x4 + i * 4, ctx->i32),
                             ""),
                "");
             break;
@@ -674,9 +659,6 @@ fsa_compute_emit_intrinsic(struct fsa_llvm_context *ctx,
                : instr->intrinsic == nir_intrinsic_load_num_workgroups ? 0x1c
                                                                        : 0x10;
             values[i] = wg_load(ctx, base + i * 4, ctx->i32);
-            if (instr->intrinsic == nir_intrinsic_load_workgroup_id)
-               values[i] =
-                  LLVMBuildAdd(ctx->builder, values[i], base_group(ctx, i), "");
             break;
          }
          }
@@ -747,11 +729,12 @@ fsa_compute_emit_intrinsic(struct fsa_llvm_context *ctx,
       ptr = byte_offset(ctx, ptr, src[1]);
       return emit_atomic(ctx, instr, ptr, src[2], src[3], result);
    case nir_intrinsic_shared_atomic:
-   case nir_intrinsic_shared_atomic_swap:
-      ptr = byte_offset(ctx, wg_load(ctx, 0x58, ctx->ptrt), src[0]);
-      ptr = byte_offset(ctx, ptr,
-                        LLVMConstInt(ctx->i64, nir_intrinsic_base(instr), 0));
+   case nir_intrinsic_shared_atomic_swap: {
+      LLVMValueRef offset = LLVMBuildAdd(ctx->builder, src[0],
+         LLVMConstInt(ctx->i32, nir_intrinsic_base(instr), 0), "");
+      ptr = byte_offset(ctx, wg_load(ctx, 0x58, ctx->ptrt), offset);
       return emit_atomic(ctx, instr, ptr, src[1], src[2], result);
+   }
    case nir_intrinsic_barrier:
       if (nir_intrinsic_execution_scope(instr) != SCOPE_NONE &&
           nir_intrinsic_execution_scope(instr) != SCOPE_WORKGROUP &&
