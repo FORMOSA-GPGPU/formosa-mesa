@@ -741,6 +741,15 @@ vtn_handle_opencl_vstore_half_r(struct vtn_builder *b, enum OpenCLstd_Entrypoint
 static unsigned
 vtn_add_printf_string(struct vtn_builder *b, uint32_t id, u_printf_info *info)
 {
+   struct vtn_value *value = vtn_untyped_value(b, id);
+   if (value->value_type == vtn_value_type_string) {
+      unsigned offset = info->string_size;
+      unsigned size = strlen(value->str) + 1;
+      info->strings = reralloc_size(b->shader, info->strings, offset + size);
+      memcpy(info->strings + offset, value->str, size);
+      info->string_size += size;
+      return offset;
+   }
    nir_deref_instr *deref = vtn_nir_deref(b, id);
 
    while (deref->deref_type != nir_deref_type_var) {
@@ -784,8 +793,8 @@ vtn_add_printf_string(struct vtn_builder *b, uint32_t id, u_printf_info *info)
 }
 
 /* printf is special because there are no limits on args */
-static void
-handle_printf(struct vtn_builder *b, uint32_t opcode,
+void
+vtn_handle_printf(struct vtn_builder *b, uint32_t opcode,
               const uint32_t *w_src, unsigned num_srcs, const uint32_t *w_dest)
 {
    if (!b->options->printf) {
@@ -853,7 +862,8 @@ handle_printf(struct vtn_builder *b, uint32_t opcode,
    /* Lastly, the actual intrinsic */
    nir_def *fmt_idx = nir_imm_int(&b->nb, info_idx);
    nir_def *ret = nir_printf(&b->nb, fmt_idx, &deref_var->def);
-   vtn_push_nir_ssa(b, w_dest[1], ret);
+   if (vtn_value(b, w_dest[0], vtn_value_type_type)->type->base_type != vtn_base_type_void)
+      vtn_push_nir_ssa(b, w_dest[1], ret);
 
    b->nb.shader->info.uses_printf = true;
 }
@@ -1103,7 +1113,7 @@ vtn_handle_opencl_instruction(struct vtn_builder *b, SpvOp ext_opcode,
       handle_instr(b, ext_opcode, w + 5, count - 5, w + 1, handle_round);
       return true;
    case OpenCLstd_Printf:
-      handle_printf(b, ext_opcode, w + 5, count - 5, w + 1);
+      vtn_handle_printf(b, ext_opcode, w + 5, count - 5, w + 1);
       return true;
    case OpenCLstd_Prefetch:
       /* TODO maybe add a nir instruction for this? */

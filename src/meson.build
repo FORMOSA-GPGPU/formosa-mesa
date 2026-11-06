@@ -109,7 +109,10 @@ if with_gallium
   subdir('mesa')
 endif
 if with_gallium_formosa
-  subdir('fsa')
+  subdir('formosa')
+endif
+if with_tools.contains('fsa-compute') or with_formosa_vk
+  subdir('formosa/compute')
 endif
 if with_gallium_or_lvp
   subdir('gallium')

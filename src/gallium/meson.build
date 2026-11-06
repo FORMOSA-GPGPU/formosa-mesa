@@ -60,7 +60,7 @@ else
   driver_llvmpipe = declare_dependency()
 endif
 if with_gallium_formosa
-  subdir('drivers/fsa')
+  subdir('drivers/formosa')
 else
   driver_fsa = declare_dependency()
 endif

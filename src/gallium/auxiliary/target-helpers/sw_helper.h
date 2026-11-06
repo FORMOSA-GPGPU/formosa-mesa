@@ -29,7 +29,7 @@
 #endif
 
 #ifdef GALLIUM_FSA
-#include "fsa/fsa_screen.h"
+#include "formosa/fsa_screen.h"
 #endif
 
 #ifdef GALLIUM_VIRGL

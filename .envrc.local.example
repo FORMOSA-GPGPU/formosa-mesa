@@ -1,0 +1,14 @@
+# Copy to .envrc.local and use absolute paths.
+export FORMOSA_SOURCE_DIR=/absolute/path/to/formosa
+
+# Optional; defaults to this Mesa checkout's outputs/out.
+# export MESA_INSTALL_PREFIX=/absolute/path/to/mesa-install
+
+# Optional local SDK; otherwise use the Formosa SDK from Nix.
+# export FORMOSA_INSTALL_PREFIX=/absolute/path/to/formosa/outputs/sdk
+
+# Independent overrides; unset components use the pinned Nix versions.
+# Keep outputs/toolchains and these installations while using this Mesa build.
+# export FORMOSA_LLVM_PREFIX=/absolute/path/to/formosa-llvm/outputs/out
+# export FORMOSA_RUNTIME_PREFIX=/absolute/path/to/formosa-runtime/outputs/out
+# export FORMOSA_POCL_PREFIX=/absolute/path/to/pocl/outputs/out

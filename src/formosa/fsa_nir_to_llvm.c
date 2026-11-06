@@ -1,5 +1,8 @@
 #include "fsa_nir_to_llvm.h"
 #include "fsa_llvm_build.h"
+#ifdef FSA_COMPUTE
+#include "fsa_compute.h"
+#endif
 
 #include <stdbool.h>
 #include "compiler/glsl_types.h"
@@ -442,6 +445,9 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
    case nir_op_inot:
       result = LLVMBuildNot(ctx->fsa.builder, src[0], "");
       break;
+   case nir_op_ineg:
+      result = LLVMBuildNeg(ctx->fsa.builder, src[0], "");
+      break;
    case nir_op_iadd:
       result = LLVMBuildAdd(ctx->fsa.builder, src[0], src[1], "");
       break;
@@ -481,6 +487,32 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
    case nir_op_imul:
       result = LLVMBuildMul(ctx->fsa.builder, src[0], src[1], "");
       break;
+   case nir_op_udiv:
+      result = LLVMBuildUDiv(ctx->fsa.builder, src[0], src[1], "");
+      break;
+   case nir_op_idiv:
+      result = LLVMBuildSDiv(ctx->fsa.builder, src[0], src[1], "");
+      break;
+   case nir_op_umod:
+      result = LLVMBuildURem(ctx->fsa.builder, src[0], src[1], "");
+      break;
+   case nir_op_irem:
+      result = LLVMBuildSRem(ctx->fsa.builder, src[0], src[1], "");
+      break;
+   case nir_op_imod: {
+      LLVMValueRef rem = LLVMBuildSRem(ctx->fsa.builder, src[0], src[1], "");
+      LLVMValueRef zero = LLVMConstNull(LLVMTypeOf(rem));
+      LLVMValueRef opposite = LLVMBuildICmp(
+         ctx->fsa.builder, LLVMIntSLT,
+         LLVMBuildXor(ctx->fsa.builder, rem, src[1], ""), zero, "");
+      LLVMValueRef nonzero =
+         LLVMBuildICmp(ctx->fsa.builder, LLVMIntNE, rem, zero, "");
+      result = LLVMBuildSelect(
+         ctx->fsa.builder,
+         LLVMBuildAnd(ctx->fsa.builder, opposite, nonzero, ""),
+         LLVMBuildAdd(ctx->fsa.builder, rem, src[1], ""), rem, "");
+      break;
+   }
    case nir_op_imul24_relaxed:
       result = emit_mul24(&ctx->fsa, src[0], src[1], true);
       break;
@@ -652,6 +684,12 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       result =
          emit_intrin_1f_param(&ctx->fsa, "llvm.sqrt",
                               fsa_to_float_type(&ctx->fsa, def_type), src[0]);
+      break;
+   case nir_op_fsin:
+   case nir_op_fcos:
+      result = emit_intrin_1f_param(
+         &ctx->fsa, instr->op == nir_op_fsin ? "llvm.sin" : "llvm.cos",
+         fsa_to_float_type(&ctx->fsa, def_type), src[0]);
       break;
    case nir_op_fexp2:
       result =
@@ -940,6 +978,9 @@ visit_alu(struct fsa_nir_context *ctx, const nir_alu_instr *instr)
       break;
    }
 
+   case nir_op_pack_64_2x32:
+      result = LLVMBuildBitCast(ctx->fsa.builder, src[0], ctx->fsa.i64, "");
+      break;
    case nir_op_pack_64_2x32_split: {
       LLVMValueRef tmp = fsa_build_gather_values(&ctx->fsa, src, 2);
       result = LLVMBuildBitCast(ctx->fsa.builder, tmp, ctx->fsa.i64, "");
@@ -1320,6 +1361,21 @@ static bool
 visit_intrinsic(struct fsa_nir_context *ctx, nir_intrinsic_instr *instr)
 {
    LLVMValueRef result = NULL;
+#ifdef FSA_COMPUTE
+   if (ctx->stage == MESA_SHADER_COMPUTE) {
+      LLVMValueRef src[8] = {0};
+      unsigned count = nir_intrinsic_infos[instr->intrinsic].num_srcs;
+      if (count > ARRAY_SIZE(src))
+         return false;
+      for (unsigned i = 0; i < count; i++)
+         src[i] = get_src(ctx, instr->src[i]);
+      if (!fsa_compute_emit_intrinsic(&ctx->fsa, instr, src, &result))
+         return false;
+      if (result)
+         ctx->ssa_defs[instr->def.index] = result;
+      return true;
+   }
+#endif
    switch (instr->intrinsic) {
    case nir_intrinsic_load_input:
       if (ctx->fsa.is_cpu) {
@@ -1555,7 +1611,42 @@ visit_block(struct fsa_nir_context *ctx, nir_block *block)
          if (!visit_intrinsic(ctx, nir_instr_as_intrinsic(instr)))
             return false;
          break;
+#ifdef FSA_COMPUTE
+      case nir_instr_type_deref: {
+         nir_deref_instr *deref = nir_instr_as_deref(instr);
+         LLVMValueRef value =
+            fsa_compute_emit_deref(&ctx->fsa, deref,
+                                   deref->deref_type == nir_deref_type_var
+                                      ? NULL
+                                      : get_src(ctx, deref->parent),
+                                   deref->deref_type == nir_deref_type_array
+                                      ? get_src(ctx, deref->arr.index)
+                                      : NULL);
+         if (!value) {
+            fprintf(stderr, "Formosa compute: unsupported dereference: ");
+            nir_print_instr(instr, stderr);
+            fprintf(stderr, "\n");
+            return false;
+         }
+         ctx->ssa_defs[deref->def.index] = value;
+         break;
+      }
+#endif
       case nir_instr_type_tex:
+#ifdef FSA_COMPUTE
+         if (ctx->stage == MESA_SHADER_COMPUTE) {
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            LLVMValueRef sources[16] = {0}, result = NULL;
+            if (tex->num_srcs > ARRAY_SIZE(sources))
+               return false;
+            for (unsigned i = 0; i < tex->num_srcs; i++)
+               sources[i] = get_src(ctx, tex->src[i].src);
+            if (!fsa_compute_emit_tex(&ctx->fsa, tex, sources, &result))
+               return false;
+            ctx->ssa_defs[tex->def.index] = result;
+            break;
+         }
+#endif
          if (!visit_tex(ctx, nir_instr_as_tex(instr)))
             return false;
          break;
@@ -1572,6 +1663,8 @@ visit_block(struct fsa_nir_context *ctx, nir_block *block)
          printf("[V_BLOCK] Type: %d not implemented,Instr: ", instr->type);
          nir_print_instr(instr, stdout);
          printf("\n");
+         if (ctx->stage == MESA_SHADER_COMPUTE)
+            return false;
          exit(-1);
       }
    }
@@ -1646,6 +1739,8 @@ visit_cf_list(struct fsa_nir_context *ctx, struct exec_list *list)
       case nir_cf_node_function:
       default:
          printf("[V_CF_LIST] Type %d not implemented\n", node->type);
+         if (ctx->stage == MESA_SHADER_COMPUTE)
+            return false;
          exit(-1);
          return false;
       }

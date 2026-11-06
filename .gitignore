@@ -7,3 +7,6 @@
 .venv/
 .clangd
 compile_commands.json
+.direnv/
+.envrc.local
+outputs/
