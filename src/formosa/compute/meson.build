@@ -33,7 +33,8 @@ compute_compiler_dep = declare_dependency(
   dependencies: [idep_vtn, idep_nir, idep_mesautil, dep_llvm],
   include_directories: [include_directories('..'), pocl_include],
 )
-executable('fsa-compute', 'main.c', dependencies: compute_compiler_dep, install: true)
+executable('fsa-compute', 'main.c', dependencies: compute_compiler_dep, install: true,
+           install_rpath: dep_llvm.get_variable(configtool: 'libdir'))
 
 if with_formosa_vk
   sdk = get_option('formosa-sdk')
@@ -64,6 +65,7 @@ if with_formosa_vk
     link_language: 'cpp',
     gnu_symbol_visibility: 'hidden',
     install: true,
+    install_rpath: dep_llvm.get_variable(configtool: 'libdir'),
   )
   custom_target('formosa_icd',
     input: [vk_icd_gen, vk_api_xml], output: 'formosa_icd.json',
