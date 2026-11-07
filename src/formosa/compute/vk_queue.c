@@ -278,6 +278,8 @@ dispatch(struct fsa_pipeline *pipeline, struct fsa_compute_args *args,
          .dimensions = 3,
          .num_groups = {x, y, z},
          .local_mem_size = pipeline->binary.shared_size,
+         /* LSAR is enabled by default. */
+         .enable_stack_remap = 1,
          .kernel_entry = pipeline->entry,
          .kernarg_address = (uintptr_t)arg_address,
          .kernel_status = (uintptr_t)status_address,
