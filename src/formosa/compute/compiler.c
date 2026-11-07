@@ -57,6 +57,17 @@ shared_layout(const struct glsl_type *type, unsigned *size, unsigned *align)
    glsl_get_natural_size_align_bytes(type, size, align);
 }
 
+static bool
+is_vote_equal(const nir_instr *instr, const void *data)
+{
+   (void)data;
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   return intr->intrinsic == nir_intrinsic_vote_feq ||
+          intr->intrinsic == nir_intrinsic_vote_ieq;
+}
+
 static void
 prepare_nir(nir_shader *nir)
 {
@@ -68,8 +79,10 @@ prepare_nir(nir_shader *nir)
    NIR_PASS_V(nir, nir_split_var_copies);
    NIR_PASS_V(nir, nir_lower_var_copies);
    NIR_PASS_V(nir, nir_lower_continue_constructs);
-   /* Preserve ordered NaN comparisons before constant votes fold to true. */
+   /* Preserve ordered NaN comparisons before constant votes fold to true.
+    * Leave ballots for the target-width lowering below. */
    const nir_lower_subgroups_options vote_options = {
+      .filter = is_vote_equal,
       .ballot_bit_size = 32,
       .ballot_components = 4,
       .lower_vote_eq = true,
